@@ -58,13 +58,14 @@ Tools exposed: loop_guard_record, loop_guard_check.
 const claudeInstructions = cliContract + `
 Claude Code setup (manual)
 ==========================
-1. Install the binary on PATH (see README).
-2. Add to ~/.claude/settings.json (loop-guard doctor --fix does this for you):
+1. Install the binary anywhere (PATH not required).
+2. Add to ~/.claude/settings.json (loop-guard doctor --fix does this for you,
+   embedding the binary's ABSOLUTE path so PATH is irrelevant):
 
    {
      "hooks": {
        "PreToolUse": [
-         { "matcher": "*", "hooks": [ { "type": "command", "command": "loop-guard claude-hook" } ] }
+         { "matcher": "*", "hooks": [ { "type": "command", "command": "\"/abs/path/to/loop-guard\" claude-hook" } ] }
        ]
      }
    }
@@ -77,11 +78,12 @@ to Claude as feedback — exactly the recovery prompt.
 const opencodeInstructions = cliContract + `
 OpenCode setup (manual)
 =======================
-1. Install the binary on PATH (see README).
+1. Install the binary anywhere (PATH not required).
 2. Copy the plugin into your config:
 
        mkdir -p .opencode/plugins
        loop-guard doctor --fix      # writes .opencode/plugins/loop-guard.js
+                                    # with the binary's absolute path embedded
 
    Or fetch it from the install: internal/cli/assets/opencode-plugin.js in the repo.
 

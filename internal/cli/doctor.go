@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 
 	"github.com/brian/loop-guard/internal/state"
 )
@@ -75,14 +78,6 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func containsLoopGuard(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	return len(locate(data, []byte("loop-guard"))) > 0 || indexOf(data, []byte("loop-guard")) >= 0
-}
-
 func indexOf(haystack, needle []byte) int {
 	for i := 0; i+len(needle) <= len(haystack); i++ {
 		match := true
@@ -99,6 +94,7 @@ func indexOf(haystack, needle []byte) int {
 	return -1
 }
 
+// locate returns all indices of needle in haystack.
 func locate(haystack, needle []byte) []int {
 	var out []int
 	for i := indexOf(haystack, needle); i >= 0; {
@@ -106,6 +102,39 @@ func locate(haystack, needle []byte) []int {
 		break
 	}
 	return out
+}
+
+// claudeWired reports whether settingsPath already carries a loop-guard hook.
+// It checks the hook structure for our adapter signature ("claude-hook")
+// rather than the binary name, which may be renamed or installed anywhere.
+// Hand-written configs invoking the binary by name are still recognized.
+func claudeWired(settingsPath string) bool {
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return false
+	}
+	var settings struct {
+		Hooks struct {
+			PreToolUse []struct {
+				Hooks []struct {
+					Command string `json:"command"`
+				} `json:"hooks"`
+			} `json:"PreToolUse"`
+		} `json:"hooks"`
+	}
+	if json.Unmarshal(data, &settings) == nil {
+		for _, entry := range settings.Hooks.PreToolUse {
+			for _, h := range entry.Hooks {
+				if strings.Contains(h.Command, "claude-hook") ||
+					strings.Contains(h.Command, "loop-guard") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	// Not valid JSON: fall back to substring scan.
+	return indexOf(data, []byte("loop-guard")) >= 0
 }
 
 func detectHarnesses(p Paths) []harnessStatus {
@@ -117,7 +146,7 @@ func detectHarnesses(p Paths) []harnessStatus {
 		{
 			Name:     "claude-code",
 			Detected: fileExists(claudeSettings) || fileExists(filepath.Join(p.Home, ".claude")),
-			Wired:    containsLoopGuard(claudeSettings),
+			Wired:    claudeWired(claudeSettings),
 			Detail:   claudeSettings,
 		},
 		{
@@ -201,6 +230,45 @@ func writableLabel(ok bool) string {
 
 func stateDefaultDir() (string, error) { return state.DefaultDir() }
 
+// ResolveLoopGuardBin determines the absolute path of the loop-guard binary
+// to embed in generated harness configs. Order:
+//  1. LOOPGUARD_BINARY env override
+//  2. this process's own executable (doctor runs AS the installed binary,
+//     so its location is authoritative)
+//  3. well-known install locations
+//  4. bare name (PATH fallback)
+func ResolveLoopGuardBin() string {
+	bin := "loop-guard"
+	if runtime.GOOS == "windows" {
+		bin = "loop-guard.exe"
+	}
+
+	if v := os.Getenv("LOOPGUARD_BINARY"); v != "" {
+		return filepath.Clean(v)
+	}
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		return exe
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", bin),
+		filepath.Join(home, "go", "bin", bin),
+		filepath.Join(home, ".bin", bin),
+		"/usr/local/bin/" + bin,
+		"/opt/homebrew/bin/" + bin,
+	}
+	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+		candidates = append(candidates,
+			filepath.Join(localAppData, "Programs", "loop-guard", bin))
+	}
+	for _, c := range candidates {
+		if fileExists(c) {
+			return c
+		}
+	}
+	return bin
+}
+
 func checkWritable(dir string) bool {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return false
@@ -243,14 +311,25 @@ func installOpenCodePlugin(root string) error {
 	if fileExists(target) {
 		return nil
 	}
+	// Embed the resolved absolute path so the plugin never depends on PATH.
+	bin, _ := json.Marshal(ResolveLoopGuardBin())
+	source := strings.ReplaceAll(string(openCodePluginSource()),
+		"__LOOPGUARD_BIN__", string(bin))
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(target, openCodePluginSource(), 0o644)
+	return os.WriteFile(target, []byte(source), 0o644)
+}
+
+// claudeCommand is the shell command embedded in Claude Code hook configs.
+// It uses the resolved absolute path so PATH is irrelevant; the path is
+// quoted for safety on all platforms.
+func claudeCommand() string {
+	return strconv.Quote(ResolveLoopGuardBin()) + " claude-hook"
 }
 
 func wireClaudeHook(settingsPath string) error {
-	if containsLoopGuard(settingsPath) {
+	if claudeWired(settingsPath) {
 		return nil
 	}
 	data, err := os.ReadFile(settingsPath)
@@ -279,7 +358,7 @@ func wireClaudeHook(settingsPath string) error {
 	hooks["PreToolUse"] = append(pre, map[string]any{
 		"matcher": "*",
 		"hooks": []any{
-			map[string]any{"type": "command", "command": "loop-guard claude-hook"},
+			map[string]any{"type": "command", "command": claudeCommand()},
 		},
 	})
 

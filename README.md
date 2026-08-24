@@ -71,6 +71,23 @@ State lives in one JSON file per session under the platform cache dir
 | MCP-speaking harnesses | stdio MCP server | register command `loop-guard serve` |
 | Anything else | generic CLI contract | `loop-guard init --harness custom` |
 
+### Binary location (no PATH requirement)
+
+Generated configs never rely on PATH. `loop-guard doctor --fix` resolves the
+binary in this order and embeds the absolute path into every config it writes:
+
+1. `LOOPGUARD_BINARY` env override
+2. the running binary itself (`doctor --fix` executes as the installed
+   loop-guard, so its own location is authoritative)
+3. well-known install locations (`~/.local/bin`, `~/go/bin`, `/usr/local/bin`,
+   `/opt/homebrew/bin`, `%LOCALAPPDATA%\Programs\loop-guard`)
+4. bare name as a last resort
+
+The OpenCode plugin additionally scans those locations at runtime if the
+embedded path stops working (e.g. you moved the binary). If you relocate it,
+re-run `doctor --fix` after removing the stale hook/plugin, or set
+`LOOPGUARD_BINARY`.
+
 ### Integrating a new harness
 
 Run `loop-guard init --harness custom`. The short version: find your harness's

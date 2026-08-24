@@ -11,13 +11,19 @@ import { spawnSync } from "node:child_process"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+// Injected at install time by `loop-guard doctor --fix` (JSON-quoted absolute
+// path). When null, only the candidate scan below is used.
+const LOOPGUARD_BIN = "__LOOPGUARD_BIN__"
+
 const candidates = [
+  LOOPGUARD_BIN.startsWith("__") ? null : LOOPGUARD_BIN,
+  process.env.LOOPGUARD_BINARY || null,
   "loop-guard",
   join(homedir(), ".local", "bin", "loop-guard"),
   join(homedir(), "go", "bin", "loop-guard"),
   "/usr/local/bin/loop-guard",
   "/opt/homebrew/bin/loop-guard",
-]
+].filter(Boolean)
 
 let resolved
 

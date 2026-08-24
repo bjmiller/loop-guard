@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -48,6 +49,22 @@ func expectNoErr(err error) {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 }
 
+var _ = Describe("ResolveLoopGuardBin", func() {
+	It("prefers the LOOPGUARD_BINARY override", func() {
+		DeferCleanup(os.Unsetenv, "LOOPGUARD_BINARY")
+		Expect(os.Setenv("LOOPGUARD_BINARY", "/custom/place/loop-guard")).To(Succeed())
+		p := cli.ResolveLoopGuardBin()
+		Expect(p).To(Equal("/custom/place/loop-guard"))
+	})
+
+	It("falls back to the running executable (authoritative install location)", func() {
+		os.Unsetenv("LOOPGUARD_BINARY")
+		exe, err := os.Executable()
+		expectNoErr(err)
+		Expect(cli.ResolveLoopGuardBin()).To(Equal(exe))
+	})
+})
+
 var _ = Describe("doctor", func() {
 	It("reports nothing detected in a clean environment", func() {
 		isolateHome()
@@ -73,6 +90,11 @@ var _ = Describe("doctor", func() {
 		data, err := os.ReadFile(filepath.Join(project, ".opencode", "plugins", "loop-guard.js"))
 		expectNoErr(err)
 		Expect(string(data)).To(ContainSubstring("tool.execute.before"))
+		// The plugin embeds the absolute binary path, JSON-quoted.
+		exe, err := os.Executable()
+		expectNoErr(err)
+		Expect(string(data)).To(ContainSubstring(strconv.Quote(exe)))
+		Expect(string(data)).NotTo(ContainSubstring("__LOOPGUARD_BIN__"))
 	})
 
 	It("--fix merges the claude settings.json hook with backup and is idempotent", func() {
@@ -90,9 +112,15 @@ var _ = Describe("doctor", func() {
 		var settings map[string]any
 		expectNoErr(json.Unmarshal(data, &settings))
 		Expect(settings["model"]).To(Equal("opus")) // preserved
-		hooks := settings["hooks"].(map[string]any)
-		pre := hooks["PreToolUse"].([]any)
+		pre := settings["hooks"].(map[string]any)["PreToolUse"].([]any)
 		Expect(pre).To(HaveLen(1))
+
+		// The hook command embeds the absolute binary path, quoted.
+		entry := pre[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
+		cmd := entry["command"].(string)
+		exe, err := os.Executable()
+		expectNoErr(err)
+		Expect(cmd).To(Equal(strconv.Quote(exe) + " claude-hook"))
 
 		backupData, err := os.ReadFile(settingsPath + ".bak-loopguard")
 		expectNoErr(err)
