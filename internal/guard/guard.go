@@ -80,8 +80,9 @@ func (g *Guard) Record(sessionID string, ev state.Event) (Verdict, error) {
 }
 
 // Check evaluates current state without recording anything or mutating the
-// session. When a loop is present, Action projects what Record would do on the
-// next occurrence.
+// session. When a loop is live it reports an inject-class action so harnesses
+// block and instruct; only an actually-tripped breaker yields exit-code-3
+// severity, and projections can never trip it.
 func (g *Guard) Check(sessionID string) Verdict {
 	g.Config = detector.WithDefaults(g.Config)
 	sess, err := g.Store.Load(sessionID)
@@ -95,11 +96,16 @@ func (g *Guard) Check(sessionID string) Verdict {
 	if !d.Loop {
 		return g.allowVerdict(sess)
 	}
+	action := ActionInjectFinal
+	if sess.Interventions+1 < g.maxInterventions() {
+		action = ActionInject
+	}
 	return Verdict{
 		OK: false, Loop: true, Kind: d.Kind, Count: d.Count,
 		Interventions:    sess.Interventions,
 		MaxInterventions: g.maxInterventions(),
-		Action:           projectAction(sess.Interventions+1, g.maxInterventions()),
+		Action:           action,
+		Message:          RecoveryMessage(d.Kind, d.Count, sess.Interventions+1 >= g.maxInterventions()),
 	}
 }
 

@@ -155,7 +155,7 @@ var _ = Describe("Guard", func() {
 
 			v := g.Check("s7")
 			Expect(v.Loop).To(BeTrue())
-			Expect(v.Action).To(Equal(guard.ActionBreaker)) // next occurrence would trip it
+			Expect(v.Action).To(Equal(guard.ActionInjectFinal)) // live loop blocks; projections never claim breaker
 
 			after, _ := store.Load("s7")
 			Expect(after.Interventions).To(Equal(before.Interventions))
