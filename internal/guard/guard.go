@@ -14,9 +14,9 @@ import (
 // Action tells the harness what to do with the verdict.
 const (
 	ActionAllow       = "allow"
-	ActionInject      = "inject"        // block + recovery prompt
-	ActionInjectFinal = "inject_final"  // block + final warning
-	ActionBreaker     = "breaker"       // stop talking to this thread
+	ActionInject      = "inject"       // block + recovery prompt
+	ActionInjectFinal = "inject_final" // block + final warning
+	ActionBreaker     = "breaker"      // stop talking to this thread
 )
 
 // DefaultMaxInterventions is the intervention budget before the breaker trips.
@@ -168,14 +168,14 @@ func (g *Guard) escalate(sess *state.Session, d detector.Verdict) Verdict {
 		return Verdict{
 			OK: false, Loop: true, Kind: d.Kind, Count: d.Count,
 			Interventions: sess.Interventions, MaxInterventions: max,
-			Action: ActionInjectFinal,
+			Action:  ActionInjectFinal,
 			Message: RecoveryMessage(d.Kind, d.Count, true),
 		}
 	default:
 		return Verdict{
 			OK: false, Loop: true, Kind: d.Kind, Count: d.Count,
 			Interventions: sess.Interventions, MaxInterventions: max,
-			Action: ActionInject,
+			Action:  ActionInject,
 			Message: RecoveryMessage(d.Kind, d.Count, false),
 		}
 	}

@@ -50,7 +50,8 @@ type Config struct {
 // WithDefaults returns cfg with zero fields replaced by package defaults.
 func WithDefaults(c Config) Config { return c.withDefaults() }
 
-func (c Config) withDefaults() Config {	if c.ToolThreshold <= 0 {
+func (c Config) withDefaults() Config {
+	if c.ToolThreshold <= 0 {
 		c.ToolThreshold = DefaultToolThreshold
 	}
 	if c.ToolWindow <= 0 {

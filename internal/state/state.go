@@ -24,11 +24,11 @@ const StaleLockAge = 10 * time.Second
 
 // Event is one recorded tool call or model response.
 type Event struct {
-	Type        string `json:"type"` // "tool" or "response"
-	Name        string `json:"name,omitempty"`
-	Args        any    `json:"args,omitempty"`
-	Text        string `json:"text,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty"`
+	Type        string    `json:"type"` // "tool" or "response"
+	Name        string    `json:"name,omitempty"`
+	Args        any       `json:"args,omitempty"`
+	Text        string    `json:"text,omitempty"`
+	Fingerprint string    `json:"fingerprint,omitempty"`
 	At          time.Time `json:"at"`
 }
 
