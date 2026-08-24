@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -116,8 +117,19 @@ func describe(e state.Event) string {
 	}
 	switch e.Type {
 	case "tool":
-		return trunc(fmt.Sprintf("`%s` args: %s", e.Name, e.Args))
+		args := formatArgs(e.Args)
+		return trunc(fmt.Sprintf("`%s` args: %s", e.Name, args))
 	default:
 		return trunc(fmt.Sprintf("%q", e.Text))
 	}
+}
+
+func formatArgs(args any) string {
+	if args == nil {
+		return "{}"
+	}
+	if b, err := json.Marshal(args); err == nil {
+		return string(b)
+	}
+	return fmt.Sprintf("%v", args)
 }
