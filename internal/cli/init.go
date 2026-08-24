@@ -80,10 +80,10 @@ OpenCode setup (manual)
 1. Install the binary on PATH (see README).
 2. Copy the plugin into your config:
 
-       mkdir -p .opencode/plugin
-       loop-guard doctor --fix      # writes .opencode/plugin/loop-guard.js
+       mkdir -p .opencode/plugins
+       loop-guard doctor --fix      # writes .opencode/plugins/loop-guard.js
 
-   Or fetch it from the install: assets/opencode-plugin.js in the repo.
+   Or fetch it from the install: internal/cli/assets/opencode-plugin.js in the repo.
 
 The plugin hooks "tool.execute.before", calls ` + "`loop-guard record`" + `, and
 throws the recovery prompt as an error on exit codes 2/3, which blocks the

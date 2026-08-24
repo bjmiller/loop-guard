@@ -57,7 +57,7 @@ func openCodeProjectRoot(p Paths) string {
 	return filepath.Join(p.WorkDir, ".opencode")
 }
 
-var openCodePluginRelPath = filepath.Join("plugin", "loop-guard.js")
+var openCodePluginRelPath = filepath.Join("plugins", "loop-guard.js")
 
 //go:embed assets/opencode-plugin.js
 var pluginFS embed.FS

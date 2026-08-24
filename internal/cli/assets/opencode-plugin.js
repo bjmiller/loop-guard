@@ -1,9 +1,12 @@
 // Loop-Guard plugin for OpenCode.
 //
-// Installed by `loop-guard doctor --fix`. Blocks tool calls when the
-// loop-guard binary detects a loop, surfacing the recovery prompt to the
-// model as the error message. If the binary is not installed this plugin is
-// a no-op, so it is always safe to keep loaded.
+// Installed by `loop-guard doctor --fix` into .opencode/plugins/ (or
+// ~/.config/opencode/plugins/). Runs inside opencode's embedded Bun runtime —
+// no Node.js or npm install required; the node:* imports below are Bun
+// built-ins. Blocks tool calls when the loop-guard binary detects a loop,
+// surfacing the recovery prompt to the model as the error message. If the
+// binary is not installed this plugin is a no-op, so it is always safe to
+// keep loaded.
 import { spawnSync } from "node:child_process"
 import { homedir } from "node:os"
 import { join } from "node:path"

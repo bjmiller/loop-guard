@@ -70,7 +70,7 @@ var _ = Describe("doctor", func() {
 		Expect(code).To(Equal(0))
 		Expect(out).To(ContainSubstring("wired opencode (project)"))
 
-		data, err := os.ReadFile(filepath.Join(project, ".opencode", "plugin", "loop-guard.js"))
+		data, err := os.ReadFile(filepath.Join(project, ".opencode", "plugins", "loop-guard.js"))
 		expectNoErr(err)
 		Expect(string(data)).To(ContainSubstring("tool.execute.before"))
 	})
