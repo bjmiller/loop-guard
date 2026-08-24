@@ -1,0 +1,54 @@
+version: 2
+
+# Local experiment builds: `goreleaser build --snapshot --clean`
+# Publishing (when ready): `goreleaser release` — requires GITHUB_TOKEN.
+project_name: loop-guard
+
+builds:
+  - id: loop-guard
+    main: .
+    binary: loop-guard
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # windows/arm64 is rare; trim matrix noise
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X github.com/brian/loop-guard/internal/cli.Version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# Release intentionally disabled while this is an experiment.
+release:
+  disable: true
+
+brews:
+  # Built for later publication; not tapped anywhere yet. Local test:
+  #   brew install --build-from-source ./Formula/loop-guard.rb
+  - repository:
+      owner: brian
+      name: homebrew-loop-guard
+    directory: Formula/
+    homepage: "https://github.com/brian/loop-guard"
+    description: "Infinite-loop prevention for coding agents"
+    license: "MIT"

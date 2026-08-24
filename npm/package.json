@@ -1,0 +1,20 @@
+{
+  "name": "loop-guard",
+  "version": "0.1.0",
+  "description": "Infinite-loop prevention for coding agents. Static Go binary distributed via platform packages.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/brian/loop-guard"
+  },
+  "bin": {
+    "loop-guard": "bin/loop-guard.js"
+  },
+  "optionalDependencies": {
+    "@loop-guard/darwin-arm64": "0.1.0",
+    "@loop-guard/darwin-x64": "0.1.0",
+    "@loop-guard/linux-arm64": "0.1.0",
+    "@loop-guard/linux-x64": "0.1.0",
+    "@loop-guard/win32-x64": "0.1.0"
+  }
+}
