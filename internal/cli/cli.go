@@ -15,10 +15,11 @@ import (
 	"github.com/brian/loop-guard/internal/detector"
 	"github.com/brian/loop-guard/internal/guard"
 	"github.com/brian/loop-guard/internal/state"
+	"github.com/brian/loop-guard/internal/version"
 )
 
 // Version is stamped at build time via -ldflags.
-var Version = "0.1.0"
+var Version = version.Version
 
 // Event is the stdin payload accepted by `record`.
 type Event struct {
@@ -35,6 +36,52 @@ type claudeHookInput struct {
 	ToolInput json.RawMessage `json:"tool_input"`
 }
 
+// copilotHookInput mirrors GitHub Copilot CLI's preToolUse hook payload.
+// Field names have varied across Copilot versions, so both camelCase and
+// snake_case spellings are accepted for every field.
+type copilotHookInput struct {
+	SessionID   string          `json:"sessionId"`
+	SessionID2  string          `json:"session_id"`
+	ToolName    string          `json:"toolName"`
+	ToolName2   string          `json:"tool_name"`
+	ToolInput   json.RawMessage `json:"toolInput"`
+	ToolInput2  json.RawMessage `json:"tool_input"`
+	Input       json.RawMessage `json:"input"`
+	Args        json.RawMessage `json:"args"`
+
+	// conversationId is the most stable per-conversation identifier Copilot
+	// has exposed in hook payloads; it wins over sessionId when present.
+	ConversationID string `json:"conversationId"`
+}
+
+func (h copilotHookInput) session() string {
+	if h.ConversationID != "" {
+		return h.ConversationID
+	}
+	if h.SessionID != "" {
+		return h.SessionID
+	}
+	return h.SessionID2
+}
+
+func (h copilotHookInput) tool() (string, json.RawMessage) {
+	name := h.ToolName
+	if name == "" {
+		name = h.ToolName2
+	}
+	args := h.ToolInput
+	if len(args) == 0 {
+		args = h.ToolInput2
+	}
+	if len(args) == 0 {
+		args = h.Input
+	}
+	if len(args) == 0 {
+		args = h.Args
+	}
+	return name, args
+}
+
 // Run executes one command and returns the process exit code.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -47,7 +94,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "check":
 		return cmdCheck(args[1:], stdout, stderr)
 	case "claude-hook":
-		return cmdClaudeHook(stdin, stdout, stderr)
+		return cmdClaudeHook(args[1:], stdin, stdout, stderr)
+	case "copilot-hook":
+		return cmdCopilotHook(args[1:], stdin, stdout, stderr)
 	case "doctor":
 		return cmdDoctor(args[1:], stdout, stderr)
 	case "init":
@@ -73,9 +122,11 @@ Commands:
   record       Record a tool call or response from JSON on stdin, then evaluate.
                Exit codes: 0 allow, 2 loop (block+instruct), 3 breaker tripped.
   check        Read-only evaluation of a session's current state.
-  claude-hook  Adapter for Claude Code PreToolUse hooks (reads hook JSON).
+  claude-hook  Adapter for Claude Code / Codex PreToolUse hooks (reads hook JSON).
+  copilot-hook Adapter for GitHub Copilot CLI preToolUse hooks (reads hook JSON).
   doctor       Detect installed harnesses, validate setup. --fix wires config.
-  init         Print integration instructions for a harness (--harness custom|claude|opencode).
+  init         Print integration instructions for a harness
+               (--harness custom|claude|opencode|codex|copilot|pi).
   serve        Run as an MCP server over stdio.
   version      Print version.
 
@@ -215,14 +266,16 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "loop-guard check: %v\n", err)
 		return exitErr
 	}
-	v := g.Check(*session)
-	if err != nil {
-		return exitErr
-	}
-	return emitVerdict(v, stdout, stderr)
+	return emitVerdict(g.Check(*session), stdout, stderr)
 }
 
-func cmdClaudeHook(stdin io.Reader, stdout, stderr io.Writer) int {
+func cmdClaudeHook(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("claude-hook", flag.ContinueOnError)
+	cacheDir := fs.String("cache-dir", "", "state directory override")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "loop-guard claude-hook: %v\n", err)
+		return exitErr
+	}
 	raw, err := readAll(stdin)
 	if err != nil || len(raw) == 0 {
 		fmt.Fprintln(stderr, "loop-guard claude-hook: expected hook JSON on stdin")
@@ -238,7 +291,7 @@ func cmdClaudeHook(stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitErr
 	}
 
-	g, err := newGuard("", detector.Config{}, guard.DefaultMaxInterventions)
+	g, err := newGuard(*cacheDir, detector.Config{}, guard.DefaultMaxInterventions)
 	if err != nil {
 		fmt.Fprintf(stderr, "loop-guard claude-hook: %v\n", err)
 		return exitErr
@@ -264,4 +317,48 @@ func rawArgs(raw json.RawMessage) any {
 		return v
 	}
 	return string(raw)
+}
+
+// cmdCopilotHook adapts GitHub Copilot CLI's preToolUse hook onto record
+// semantics. It shares the exit-code contract with claude-hook: 0 allow,
+// 2 block (stderr holds the recovery prompt), 3 breaker tripped, 1 error.
+func cmdCopilotHook(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("copilot-hook", flag.ContinueOnError)
+	cacheDir := fs.String("cache-dir", "", "state directory override")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "loop-guard copilot-hook: %v\n", err)
+		return exitErr
+	}
+	raw, err := readAll(stdin)
+	if err != nil || len(raw) == 0 {
+		fmt.Fprintf(stderr, "loop-guard copilot-hook: expected hook JSON on stdin")
+		return exitErr
+	}
+	var h copilotHookInput
+	if err := json.Unmarshal(raw, &h); err != nil {
+		fmt.Fprintf(stderr, "loop-guard copilot-hook: parse hook input: %v\n", err)
+		return exitErr
+	}
+	session := h.session()
+	name, toolArgs := h.tool()
+	if session == "" || name == "" {
+		fmt.Fprintf(stderr, "loop-guard copilot-hook: hook input needs a session/conversation id and a tool name")
+		return exitErr
+	}
+
+	g, err := newGuard(*cacheDir, detector.Config{}, guard.DefaultMaxInterventions)
+	if err != nil {
+		fmt.Fprintf(stderr, "loop-guard copilot-hook: %v\n", err)
+		return exitErr
+	}
+	v, err := g.Record(session, state.Event{
+		Type: "tool",
+		Name: name,
+		Args: rawArgs(toolArgs),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "loop-guard copilot-hook: %v\n", err)
+		return exitErr
+	}
+	return emitVerdict(v, stdout, stderr)
 }

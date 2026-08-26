@@ -104,10 +104,11 @@ func canonicalize(v any) any {
 		}
 		return out
 	case []any:
+		out := make([]any, len(t))
 		for i := range t {
-			t[i] = canonicalize(t[i])
+			out[i] = canonicalize(t[i])
 		}
-		return t
+		return out
 	case float64:
 		if t == math.Trunc(t) && math.Abs(t) < 1e15 {
 			return int64(t)

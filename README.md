@@ -35,7 +35,8 @@ Then wire your harness(es):
 
 ```sh
 loop-guard doctor          # report detected harnesses + self-tests
-loop-guard doctor --fix    # auto-wire opencode / Claude Code configs
+loop-guard doctor --fix    # auto-wire opencode / Claude Code / Codex /
+                           # Copilot CLI / Pi configs
 ```
 
 `--fix` is idempotent, merges JSON instead of overwriting it, and backs up any
@@ -67,7 +68,10 @@ State lives in one JSON file per session under the platform cache dir
 | Harness | Mechanism | Setup |
 |---------|-----------|-------|
 | OpenCode | plugin (`tool.execute.before`) | `doctor --fix`, or copy `internal/cli/assets/opencode-plugin.js` |
-| Claude Code | `PreToolUse` hook (`claude-hook` adapter) | `doctor --fix`, or `init --harness claude` for manual steps |
+| Claude Code (CLI, IDE, or Desktop app) | `PreToolUse` hook (`claude-hook` adapter) — Desktop fires the same hooks from `~/.claude/settings.json` | `doctor --fix`, or `init --harness claude` for manual steps |
+| Codex CLI / ChatGPT desktop app | `PreToolUse` hook in `.codex/hooks.json` (shared config; exit 2 + stderr blocks) | `doctor --fix`, or `init --harness codex`; trust via `/hooks` inside Codex |
+| GitHub Copilot CLI | `preToolUse` command hook (`.github/hooks/`) via the native `copilot-hook` adapter | `doctor --fix`, or `init --harness copilot` |
+| Pi coding agent | TypeScript extension (`tool_call` event) | `doctor --fix`, or `init --harness pi` |
 | MCP-speaking harnesses | stdio MCP server | register command `loop-guard serve` |
 | Anything else | generic CLI contract | `loop-guard init --harness custom` |
 

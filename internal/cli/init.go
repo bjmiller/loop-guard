@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"io"
 )
-
 func cmdInit(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	harness := fs.String("harness", "custom", "which harness: custom, claude, or opencode")
+	harness := fs.String("harness", "custom", "which harness: custom, claude, opencode, codex, copilot, or pi")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "loop-guard init: %v\n", err)
 		return exitErr
@@ -19,10 +18,16 @@ func cmdInit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, claudeInstructions)
 	case "opencode":
 		fmt.Fprint(stdout, opencodeInstructions)
+	case "codex":
+		io.WriteString(stdout, codexInstructions)
+	case "copilot":
+		io.WriteString(stdout, copilotInstructions)
+	case "pi":
+		io.WriteString(stdout, piInstructions)
 	case "custom":
 		fmt.Fprint(stdout, customInstructions)
 	default:
-		fmt.Fprintf(stderr, "loop-guard init: unknown harness %q (want custom, claude, or opencode)\n", *harness)
+		fmt.Fprintf(stderr, "loop-guard init: unknown harness %q (want custom, claude, opencode, codex, copilot, or pi)\n", *harness)
 		return exitErr
 	}
 	return exitOK
@@ -90,6 +95,170 @@ OpenCode setup (manual)
 The plugin hooks "tool.execute.before", calls ` + "`loop-guard record`" + `, and
 throws the recovery prompt as an error on exit codes 2/3, which blocks the
 tool call and shows the model what to do instead.
+`
+
+const codexInstructions = cliContract + `
+OpenAI Codex CLI setup
+======================
+Codex reuses Claude Code's hook event names and stdin payload shape, so the
+claude-hook adapter works as-is — only the config format differs.
+
+Automatic: 'loop-guard doctor --fix' merges the hook into ~/.codex/hooks.json
+(user) or .codex/hooks.json (project), backing up any existing file. It cannot
+complete activation for you: run /hooks inside Codex and trust the new hook
+(Codex >= 0.129 refuses to run untrusted hooks).
+
+Manual steps if you prefer:
+
+1. Enable hooks in .codex/config.toml (project) or ~/.codex/config.toml
+   (user). Recent Codex versions default this to true:
+
+        [features]
+        hooks = true
+
+2. Create .codex/hooks.json (project) or ~/.codex/hooks.json (user):
+
+    {
+      "hooks": {
+        "PreToolUse": [
+          {
+            "matcher": "*",
+            "hooks": [
+              { "type": "command", "command": "\"/abs/path/to/loop-guard\" claude-hook" }
+            ]
+          }
+        ]
+      }
+    }
+
+   If your Codex version does not surface stderr on exit 2 as feedback to the
+   model, wrap the adapter so a loop becomes an explicit block decision on
+   stdout instead:
+
+        #!/bin/sh
+        # .codex/hooks/loop-guard.sh
+        msg=$(mktemp)
+        loop-guard claude-hook >/dev/null 2>"$msg"
+        code=$?
+        case $code in
+          0) rm -f "$msg"; exit 0 ;;
+          2|3)
+            jq -Rs '{decision: "block", reason: .}' <"$msg"
+            rm -f "$msg"; exit 0 ;;
+          *) rm -f "$msg"; cat >&2; exit 0 ;;
+        esac
+
+3. Trust the hook: run /hooks inside Codex and approve it (Codex >= 0.129
+   refuses to run untrusted hooks).
+
+Exit code 3 (breaker) blocks the call and the recovery message names the
+handoff artifact; end the session manually and restart fresh from that file.
+`
+
+const copilotInstructions = cliContract + `
+GitHub Copilot CLI setup
+========================
+Automatic: 'loop-guard doctor --fix' writes loop-guard-hooks.json into
+.github/hooks/ (project) or ~/.copilot/hooks/ ($COPILOT_HOME/hooks, user),
+invoking the native 'copilot-hook' adapter — no jq or shell wrapper needed.
+
+Manual steps if you prefer:
+Copilot CLI runs command hooks at lifecycle points. preToolUse is FAIL-CLOSED:
+exit 2 denies, and any other non-zero exit also denies. The wrapper below
+therefore maps loop-guard's own errors to exit 0 (fail-open) so a broken
+install never blocks every tool call.
+
+1. Create .github/hooks/loop-guard.sh in your repository (or a user-level
+   script under ~/.copilot/):
+
+        #!/bin/sh
+        # Maps Copilot's preToolUse payload onto loop-guard's generic contract.
+        # Requires jq.
+        payload=$(cat)
+        session=$(printf '%s' "$payload" | jq -r '.sessionId // .session_id // "copilot"')
+        tool=$(printf '%s' "$payload" | jq -r '.toolName // .tool_name // empty')
+        [ -z "$tool" ] && exit 0
+        args=$(printf '%s' "$payload" | jq -c '.toolInput // .input // .args // {}')
+
+        msg=$(mktemp)
+        printf '{"type":"tool","name":"%s","args":%s}' "$tool" "$args" \
+          | loop-guard record --session "$session" >/dev/null 2>"$msg"
+        code=$?
+        case $code in
+          0) ;;
+          2|3) cat "$msg" >&2 ;;   # deny; Copilot feeds stderr back on exit 2
+          *) ;;                    # our own error: allow rather than fail closed
+        esac
+        rm -f "$msg"
+        [ "$code" -eq 0 ] && exit 0
+        exit 2
+
+2. Register it in .github/hooks/loop-guard-hooks.json (repository-level) or
+   $COPILOT_HOME/hooks/loop-guard-hooks.json / ~/.copilot/hooks/
+   (user-level):
+
+    {
+      "version": 1,
+      "hooks": {
+        "preToolUse": [
+          { "type": "command", "bash": "/abs/path/to/.github/hooks/loop-guard.sh" }
+        ]
+      }
+    }
+
+Field names of the hook payload have varied across Copilot versions; if your
+build sends different keys, adjust the jq selectors in step 1 and consult the
+GitHub Copilot hooks reference for the exact schema.
+`
+
+const piInstructions = cliContract + `
+Pi coding agent setup (badlogic/pi-mono)
+========================================
+Automatic: 'loop-guard doctor --fix' installs the extension into
+.pi/extensions/ (project) or ~/.pi/agent/extensions/ (global) with the
+binary's absolute path embedded.
+
+Manual steps if you prefer:
+Pi extensions are TypeScript modules auto-discovered from .pi/extensions/
+(project) or ~/.pi/agent/extensions/ (global). The tool_call handler can
+block with { block: true, reason }.
+
+Create .pi/extensions/loop-guard.ts (or ~/.pi/agent/extensions/loop-guard.ts):
+
+    import { spawnSync } from "node:child_process";
+
+    export default function (pi) {
+      pi.on("tool_call", async (event, ctx) => {
+        const bin = process.env.LOOPGUARD_BINARY ?? "loop-guard";
+        const session =
+          String(ctx.sessionManager.getSessionId?.() ?? "pi");
+        let r;
+        try {
+          r = spawnSync(
+            bin,
+            ["record", "--session", session],
+            {
+              input: JSON.stringify({
+                type: "tool",
+                name: event.toolName,
+                args: event.input ?? {},
+              }),
+              encoding: "utf8",
+            },
+          );
+        } catch {
+          return; // never break pi because loop-guard failed to run
+        }
+        if (r.status === 2 || r.status === 3) {
+          const reason = (r.stderr || "").trim() || "Loop-Guard blocked this call.";
+          if (r.status === 3) ctx.abort(); // breaker tripped: stop this session
+          return { block: true, reason };
+        }
+      });
+    }
+
+Reload with /reload (or restart pi). Exit code 3 additionally aborts the
+session; seed a FRESH session with the handoff artifact named in the reason.
 `
 
 const customInstructions = cliContract + `

@@ -3,6 +3,7 @@ package state_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +65,12 @@ var _ = Describe("Store", func() {
 			Expect(s.Events).To(HaveLen(state.MaxEvents))
 		})
 
+		It("refuses to persist or load an unsafe session id", func() {
+			Expect(store.Update("../escape", func(s *state.Session) {})).To(MatchError(state.ErrInvalidSessionID))
+			_, err := store.Load("../escape")
+			Expect(err).To(MatchError(state.ErrInvalidSessionID))
+		})
+
 		It("recovers from a corrupt state file by starting fresh", func() {
 			path := filepath.Join(dir, "broken.json")
 			Expect(os.WriteFile(path, []byte("{not json"), 0o600)).To(Succeed())
@@ -119,6 +126,28 @@ var _ = Describe("Store", func() {
 var _ = Describe("SessionStatePath", func() {
 	It("joins the directory and session id", func() {
 		Expect(state.SessionStatePath("/cache", "abc")).To(Equal(filepath.Join("/cache", "abc.json")))
+	})
+})
+
+var _ = Describe("ValidSessionID", func() {
+	It("accepts ordinary identifiers", func() {
+		Expect(state.ValidSessionID("s1")).To(BeTrue())
+		Expect(state.ValidSessionID("sess-01_abc")).To(BeTrue())
+	})
+
+	It("rejects path traversal and separators", func() {
+		Expect(state.ValidSessionID("../../etc/passwd")).To(BeFalse())
+		Expect(state.ValidSessionID("a/b")).To(BeFalse())
+		Expect(state.ValidSessionID("a\\b")).To(BeFalse())
+		Expect(state.ValidSessionID("..")).To(BeFalse())
+		Expect(state.ValidSessionID("a..b")).To(BeFalse())
+	})
+
+	It("rejects empty, oversized, and non-printable ids", func() {
+		Expect(state.ValidSessionID("")).To(BeFalse())
+		Expect(state.ValidSessionID(strings.Repeat("x", 129))).To(BeFalse())
+		Expect(state.ValidSessionID("a\nb")).To(BeFalse())
+		Expect(state.ValidSessionID("a b")).To(BeFalse())
 	})
 })
 

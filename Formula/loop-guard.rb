@@ -8,7 +8,7 @@ class LoopGuard < Formula
   depends_on "go" => :build
 
   def install
-    system "go", "build", "-ldflags", "-s -w -X github.com/brian/loop-guard/internal/cli.Version=#{version}", *std_go_args(output: bin/"loop-guard")
+    system "go", "build", "-ldflags", "-s -w -X github.com/brian/loop-guard/internal/version.Version=#{version}", *std_go_args(output: bin/"loop-guard")
   end
 
   test do

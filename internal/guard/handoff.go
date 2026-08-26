@@ -33,8 +33,9 @@ Repeating the pattern again will trip the circuit breaker and end this session.`
 
 // WriteHandoff emits the structured restart artifact when the breaker trips.
 // It is written for a *fresh* session to consume; the corrupted transcript is
-// never replayed.
-func WriteHandoff(dir string, sess *state.Session, kind string, count int) (string, error) {
+// never replayed. now stamps the "tripped at" line; callers pass their
+// store's clock time so tests stay deterministic.
+func WriteHandoff(dir string, sess *state.Session, kind string, count int, now time.Time) (string, error) {
 	path := HandoffPathFor(dir, sess.ID)
 
 	var b strings.Builder
@@ -45,7 +46,7 @@ func WriteHandoff(dir string, sess *state.Session, kind string, count int) (stri
 			"session seeded with this file only — do not replay the old transcript.\n\n")
 
 	fmt.Fprintf(&b, "- Session id: `%s`\n", sess.ID)
-	fmt.Fprintf(&b, "- Tripped at: %s\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "- Tripped at: %s\n", now.UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "- Loop kind: **%s** (%d consecutive occurrences)\n", kind, count)
 	fmt.Fprintf(&b, "- Interventions attempted before breaker: %d\n\n", sess.Interventions)
 
@@ -84,12 +85,12 @@ func WriteHandoff(dir string, sess *state.Session, kind string, count int) (stri
 	return path, nil
 }
 
-// loopPattern summarizes the repeating entries at the tail of history.
+// loopPattern summarizes the most recent matching entries at the tail of
+// history, newest first.
 func loopPattern(sess *state.Session, kind string) []string {
 	var out []string
-	n := len(sess.Events)
-	for i := n - 1; i >= 0 && len(out) < 3; i-- {
-		e := sess.Events[n-1-i]
+	for i := len(sess.Events) - 1; i >= 0 && len(out) < 3; i-- {
+		e := sess.Events[i]
 		if kindFor(e) != kind {
 			continue
 		}

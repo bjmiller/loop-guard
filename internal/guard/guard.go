@@ -57,7 +57,7 @@ func HandoffPathFor(dir, id string) string {
 
 // Record appends ev to the session history and returns the verdict.
 func (g *Guard) Record(sessionID string, ev state.Event) (Verdict, error) {
-	g.Config = detector.WithDefaults(g.Config)
+	cfg := detector.WithDefaults(g.Config) // local copy: Guard may be shared
 	if ev.Fingerprint == "" && ev.Type == "tool" {
 		ev.Fingerprint = detector.ToolFingerprint(ev.Name, ev.Args)
 	}
@@ -69,9 +69,9 @@ func (g *Guard) Record(sessionID string, ev state.Event) (Verdict, error) {
 			return
 		}
 		sess.Events = append(sess.Events, ev)
-		if d := g.detect(sess); d.Loop {
+		if d := g.detect(sess, cfg); d.Loop {
 			sess.Interventions++
-			verdict = g.escalate(sess, d)
+			verdict = g.escalate(sess, d, cfg)
 			return
 		}
 		verdict = g.allowVerdict(sess)
@@ -84,7 +84,7 @@ func (g *Guard) Record(sessionID string, ev state.Event) (Verdict, error) {
 // block and instruct; only an actually-tripped breaker yields exit-code-3
 // severity, and projections can never trip it.
 func (g *Guard) Check(sessionID string) Verdict {
-	g.Config = detector.WithDefaults(g.Config)
+	cfg := detector.WithDefaults(g.Config) // local copy: Guard may be shared
 	sess, err := g.Store.Load(sessionID)
 	if err != nil {
 		return Verdict{OK: true, Action: ActionAllow}
@@ -92,7 +92,7 @@ func (g *Guard) Check(sessionID string) Verdict {
 	if sess.Breaker {
 		return g.breakerVerdict(sess)
 	}
-	d := g.detect(sess)
+	d := g.detect(sess, cfg)
 	if !d.Loop {
 		return g.allowVerdict(sess)
 	}
@@ -131,7 +131,7 @@ func projectAction(next, max int) string {
 
 // detect runs both detectors over the stored history tail (the event under
 // evaluation has already been appended by Record).
-func (g *Guard) detect(sess *state.Session) detector.Verdict {
+func (g *Guard) detect(sess *state.Session, cfg detector.Config) detector.Verdict {
 	var toolFPS []string
 	var texts []string
 	for _, e := range sess.Events {
@@ -141,21 +141,21 @@ func (g *Guard) detect(sess *state.Session) detector.Verdict {
 			texts = append(texts, e.Text)
 		}
 	}
-	v := detector.DetectToolLoop(toolFPS, g.Config)
+	v := detector.DetectToolLoop(toolFPS, cfg)
 	if !v.Loop {
-		v = detector.DetectResponseLoop(texts, g.Config)
+		v = detector.DetectResponseLoop(texts, cfg)
 	}
 	return v
 }
 
 // escalate applies the ladder step implied by the just-incremented
 // intervention count. Callers must have incremented sess.Interventions first.
-func (g *Guard) escalate(sess *state.Session, d detector.Verdict) Verdict {
+func (g *Guard) escalate(sess *state.Session, d detector.Verdict, cfg detector.Config) Verdict {
 	max := g.maxInterventions()
 	switch action := projectAction(sess.Interventions, max); action {
 	case ActionBreaker:
 		sess.Breaker = true
-		path, err := WriteHandoff(g.Store.Dir, sess, d.Kind, d.Count)
+		path, err := WriteHandoff(g.Store.Dir, sess, d.Kind, d.Count, g.Store.Now())
 		out := g.breakerVerdict(sess)
 		out.Loop, out.Kind, out.Count = true, d.Kind, d.Count
 		if err != nil {

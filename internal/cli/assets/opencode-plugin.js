@@ -11,8 +11,9 @@ import { spawnSync } from "node:child_process"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-// Injected at install time by `loop-guard doctor --fix` (JSON-quoted absolute
-// path). When null, only the candidate scan below is used.
+// Injected at install time by `loop-guard doctor --fix`, which replaces this
+// string-literal placeholder wholesale with a JSON-quoted absolute path.
+// When null, only the candidate scan below is used.
 const LOOPGUARD_BIN = "__LOOPGUARD_BIN__"
 
 const candidates = [

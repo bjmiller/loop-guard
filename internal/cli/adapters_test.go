@@ -49,6 +49,165 @@ func expectNoErr(err error) {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 }
 
+var _ = Describe("copilot-hook", func() {
+	var cacheDir string
+
+	BeforeEach(func() {
+		cacheDir = GinkgoT().TempDir()
+		DeferCleanup(os.Unsetenv, "LOOPGUARD_CACHE_DIR")
+		Expect(os.Setenv("LOOPGUARD_CACHE_DIR", cacheDir)).To(Succeed())
+	})
+
+	It("maps a camelCase Copilot payload onto record semantics", func() {
+		code, out, _ := runCLIWithStdin(
+			`{"conversationId":"conv-1","toolName":"bash","toolInput":{"command":"npm test"}}`,
+			"copilot-hook")
+		Expect(code).To(Equal(0))
+		var v map[string]any
+		Expect(json.Unmarshal([]byte(out), &v)).To(Succeed())
+		Expect(v["action"]).To(Equal("allow"))
+
+		data, err := os.ReadFile(filepath.Join(cacheDir, "conv-1.json"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(data)).To(ContainSubstring("npm test"))
+	})
+
+	It("accepts snake_case spellings and sessionId fallback", func() {
+		code, _, _ := runCLIWithStdin(
+			`{"session_id":"sess-2","tool_name":"bash","args":{"command":"ls"}}`,
+			"copilot-hook")
+		Expect(code).To(Equal(0))
+		_, err := os.Stat(filepath.Join(cacheDir, "sess-2.json"))
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("blocks with exit 2 on loop detection", func() {
+		payload := `{"conversationId":"conv-3","toolName":"Bash","toolInput":{"command":"flaky"}}`
+		for i := 0; i < 2; i++ {
+			runCLIWithStdin(payload, "copilot-hook")
+		}
+		code, _, stderr := runCLIWithStdin(payload, "copilot-hook")
+		Expect(code).To(Equal(2))
+		Expect(stderr).NotTo(BeEmpty())
+	})
+})
+
+var _ = Describe("doctor --fix (codex/copilot/pi)", func() {
+	It("merges a PreToolUse hook into an existing Codex hooks.json with backup", func() {
+		home := isolateHome()
+		codexDir := filepath.Join(home, ".codex")
+		expectNoErr(os.MkdirAll(codexDir, 0o755))
+		hooksPath := filepath.Join(codexDir, "hooks.json")
+		expectNoErr(os.WriteFile(hooksPath, []byte(`{"hooks":{"PreToolUse":[]}}`), 0o600))
+
+		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
+		Expect(code).To(Equal(0))
+		Expect(out).To(ContainSubstring("wired codex"))
+		Expect(out).To(ContainSubstring("/hooks"))
+
+		data, err := os.ReadFile(hooksPath)
+		expectNoErr(err)
+		var hooks struct {
+			Hooks struct {
+				PreToolUse []struct {
+					Matcher string `json:"matcher"`
+					Hooks   []struct {
+						Command string `json:"command"`
+					} `json:"hooks"`
+				} `json:"PreToolUse"`
+			} `json:"hooks"`
+		}
+		expectNoErr(json.Unmarshal(data, &hooks))
+		Expect(hooks.Hooks.PreToolUse).To(HaveLen(1))
+		Expect(hooks.Hooks.PreToolUse[0].Hooks[0].Command).
+			To(Equal(strconv.Quote(mustExe()) + " claude-hook"))
+
+		backupData, err := os.ReadFile(hooksPath + ".bak-loopguard")
+		expectNoErr(err)
+		Expect(string(backupData)).To(Equal(`{"hooks":{"PreToolUse":[]}}`))
+	})
+
+	It("writes a Copilot preToolUse config invoking the copilot-hook adapter", func() {
+		isolateHome()
+		project := GinkgoT().TempDir()
+		expectNoErr(os.MkdirAll(filepath.Join(project, ".github"), 0o755))
+		expectNoErr(os.Chdir(project))
+		DeferCleanup(func() { expectNoErr(os.Chdir(project)) })
+
+		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
+		Expect(code).To(Equal(0))
+		Expect(out).To(ContainSubstring("wired copilot-cli"))
+
+		path := filepath.Join(project, ".github", "hooks", "loop-guard-hooks.json")
+		data, err := os.ReadFile(path)
+		expectNoErr(err)
+		var cfg map[string]any
+		expectNoErr(json.Unmarshal(data, &cfg))
+		Expect(cfg["version"]).To(Equal(float64(1)))
+		hooks := cfg["hooks"].(map[string]any)["preToolUse"].([]any)
+		Expect(hooks).To(HaveLen(1))
+		entry := hooks[0].(map[string]any)
+		Expect(entry["bash"]).To(Equal(strconv.Quote(mustExe()) + " copilot-hook"))
+	})
+
+	It("installs the Pi extension with the binary path embedded", func() {
+		home := isolateHome()
+		expectNoErr(os.MkdirAll(filepath.Join(home, ".pi"), 0o755))
+
+		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
+		Expect(code).To(Equal(0))
+		Expect(out).To(ContainSubstring("wired pi"))
+
+		path := filepath.Join(home, ".pi", "agent", "extensions", "loop-guard.ts")
+		data, err := os.ReadFile(path)
+		expectNoErr(err)
+		s := string(data)
+		Expect(s).To(ContainSubstring(`pi.on("tool_call"`))
+		Expect(s).To(ContainSubstring(strconv.Quote(mustExe())))
+		Expect(s).NotTo(ContainSubstring("__LOOPGUARD_BIN__"))
+	})
+})
+
+var _ = Describe("desktop apps", func() {
+	It("treats the Claude Desktop app as claude-code: same settings.json, wired by --fix", func() {
+		home := isolateHome()
+		// Desktop app installed, but ~/.claude does not exist yet.
+		expectNoErr(os.MkdirAll(filepath.Join(home, "Library", "Application Support", "Claude"), 0o755))
+
+		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
+		Expect(code).To(Equal(0))
+		Expect(out).To(ContainSubstring("wired claude-code"))
+
+		// The standard user-settings hook is what the Desktop app reads.
+		data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+		expectNoErr(err)
+		var settings map[string]any
+		expectNoErr(json.Unmarshal(data, &settings))
+		Expect(settings["hooks"]).NotTo(BeNil())
+	})
+
+	It("treats the ChatGPT Desktop app as codex: same ~/.codex config, wired by --fix", func() {
+		home := isolateHome()
+		// Desktop app installed, but ~/.codex does not exist yet.
+		expectNoErr(os.MkdirAll(filepath.Join(home, "Library", "Application Support", "com.openai.chat"), 0o755))
+
+		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
+		Expect(code).To(Equal(0))
+		Expect(out).To(ContainSubstring("wired codex"))
+		Expect(out).To(ContainSubstring("/hooks"))
+
+		data, err := os.ReadFile(filepath.Join(home, ".codex", "hooks.json"))
+		expectNoErr(err)
+		Expect(string(data)).To(ContainSubstring("claude-hook"))
+	})
+})
+
+func mustExe() string {
+	exe, err := os.Executable()
+	expectNoErr(err)
+	return exe
+}
+
 var _ = Describe("ResolveLoopGuardBin", func() {
 	It("prefers the LOOPGUARD_BINARY override", func() {
 		DeferCleanup(os.Unsetenv, "LOOPGUARD_BINARY")
@@ -147,15 +306,20 @@ var _ = Describe("init", func() {
 	})
 
 	It("prints harness-specific instructions", func() {
-		var out bytes.Buffer
-		code := cli.Run([]string{"init", "--harness", "claude"}, strings.NewReader(""), &out, &bytes.Buffer{})
-		Expect(code).To(Equal(0))
-		Expect(out.String()).To(ContainSubstring("PreToolUse"))
-
-		out.Reset()
-		code = cli.Run([]string{"init", "--harness", "opencode"}, strings.NewReader(""), &out, &bytes.Buffer{})
-		Expect(code).To(Equal(0))
-		Expect(out.String()).To(ContainSubstring("tool.execute.before"))
+		cases := []struct{ harness, want string }{
+			{"claude", "PreToolUse"},
+			{"opencode", "tool.execute.before"},
+			{"codex", ".codex/hooks.json"},
+			{"copilot", "preToolUse"},
+			{"pi", "tool_call"},
+		}
+		for _, tc := range cases {
+			var out bytes.Buffer
+			code := cli.Run([]string{"init", "--harness", tc.harness}, strings.NewReader(""), &out, &bytes.Buffer{})
+			ExpectWithOffset(1, code).To(Equal(0), tc.harness)
+			ExpectWithOffset(1, out.String()).To(ContainSubstring(tc.want), tc.harness)
+			ExpectWithOffset(1, out.String()).To(ContainSubstring("loop-guard record --session"), tc.harness)
+		}
 	})
 
 	It("rejects unknown harness names", func() {

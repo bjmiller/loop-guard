@@ -13,6 +13,7 @@ import (
 	"github.com/brian/loop-guard/internal/detector"
 	"github.com/brian/loop-guard/internal/guard"
 	"github.com/brian/loop-guard/internal/state"
+	"github.com/brian/loop-guard/internal/version"
 )
 
 const protocolVersion = "2024-11-05"
@@ -60,7 +61,7 @@ func Serve(in io.Reader, out io.Writer, cacheDir string) {
 	}
 }
 
-func cliVersion() string { return "0.1.0" }
+func cliVersion() string { return version.Version }
 
 func handleToolCall(out io.Writer, id json.RawMessage, params json.RawMessage, cacheDir string) {
 	var p struct {
@@ -180,7 +181,12 @@ func writeError(out io.Writer, id json.RawMessage, code int, msg string) {
 	if len(id) == 0 {
 		id = json.RawMessage("null")
 	}
-	fmt.Fprintf(out, "{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{\"code\":%d,\"message\":%q}}\n", id, code, msg)
+	b, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error":   map[string]any{"code": code, "message": msg},
+	})
+	fmt.Fprintf(out, "%s\n", b)
 }
 
 func writeToolError(out io.Writer, id json.RawMessage, msg string) {

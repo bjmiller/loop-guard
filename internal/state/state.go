@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -89,6 +91,33 @@ func DefaultDir() (string, error) {
 	return filepath.Join(base, "loop-guard"), nil
 }
 
+// ErrInvalidSessionID is returned when a session id could escape the state
+// directory (path separators, "..", control characters) or is unusable.
+var ErrInvalidSessionID = errors.New("invalid session id: use letters, digits, dot, dash, or underscore only")
+
+// ValidSessionID reports whether id is safe to embed in a file name under the
+// state directory. It rejects empty ids, path separators, "..", and any byte
+// outside [A-Za-z0-9._-], so a hostile session id cannot traverse out of the
+// cache dir.
+func ValidSessionID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	if strings.Contains(id, "..") {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '-' || c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // SessionStatePath is the JSON file backing a session id.
 func SessionStatePath(dir, id string) string {
 	return filepath.Join(dir, id+".json")
@@ -114,10 +143,17 @@ func (s *Store) now() time.Time {
 	return s.clock.Now()
 }
 
+// Now exposes the store's clock (default: real time) for callers that need
+// matching timestamps, e.g. handoff artifacts.
+func (s *Store) Now() time.Time { return s.now() }
+
 // Load returns the session for id. A missing or corrupt file yields a fresh
 // session — corrupt-state recovery means a broken cache can never wedge the
 // harness.
 func (s *Store) Load(id string) (*Session, error) {
+	if !ValidSessionID(id) {
+		return nil, ErrInvalidSessionID
+	}
 	path := SessionStatePath(s.Dir, id)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -146,6 +182,9 @@ func (s *Store) fresh(id string) *Session {
 // Update loads the session under an advisory lock, applies fn, and persists
 // atomically. fn may mutate freely; MaxEvents is enforced afterwards.
 func (s *Store) Update(id string, fn func(*Session)) error {
+	if !ValidSessionID(id) {
+		return ErrInvalidSessionID
+	}
 	release, err := s.lock(id)
 	if err != nil {
 		return err
@@ -175,7 +214,17 @@ func (s *Store) Update(id string, fn func(*Session)) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("write session: %w", err)
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		// os.Rename does not replace an existing file on Windows.
+		if runtime.GOOS == "windows" {
+			os.Remove(path)
+			if err2 := os.Rename(tmp, path); err2 == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("persist session: %w", err)
+	}
+	return nil
 }
 
 const (

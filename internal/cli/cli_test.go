@@ -190,6 +190,18 @@ var _ = Describe("claude-hook", func() {
 		code, _, _ := runCLIWithStdin("garbage", "claude-hook")
 		Expect(code).To(Equal(1))
 	})
+
+	It("honors --cache-dir", func() {
+		custom := GinkgoT().TempDir()
+		code, out, _ := runCLIWithStdin(claudeHookJSON, "claude-hook", "--cache-dir", custom)
+		Expect(code).To(Equal(0))
+		var v map[string]any
+		Expect(json.Unmarshal([]byte(out), &v)).To(Succeed())
+
+		data, err := os.ReadFile(filepath.Join(custom, "cl-123.json"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(data)).To(ContainSubstring("npm test"))
+	})
 })
 
 var _ = Describe("version", func() {
