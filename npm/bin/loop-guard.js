@@ -52,4 +52,9 @@ const result = spawnSync(resolveBinary(), process.argv.slice(2), {
   stdio: "inherit",
 });
 if (result.error) fail(result.error.message);
+if (result.signal) {
+  // Propagate the child's fatal signal to this process instead of masking it
+  // as exit 1 (Ctrl-C, SIGTERM, ...).
+  process.kill(process.pid, result.signal);
+}
 process.exit(result.status ?? 1);

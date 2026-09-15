@@ -3,14 +3,13 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -43,38 +42,6 @@ type Session struct {
 	Breaker       bool      `json:"breaker"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
-}
-
-// Clock abstracts time for deterministic tests.
-type Clock interface {
-	Now() time.Time
-}
-
-type realClock struct{}
-
-func (realClock) Now() time.Time { return time.Now() }
-
-// FakeClock is a controllable Clock for tests.
-type FakeClock struct {
-	mu sync.Mutex
-	t  time.Time
-}
-
-// NewFakeClock returns a FakeClock fixed at t.
-func NewFakeClock(t time.Time) *FakeClock { return &FakeClock{t: t} }
-
-// Now returns the current fake time.
-func (c *FakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.t
-}
-
-// Advance moves the fake clock forward by d.
-func (c *FakeClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.t = c.t.Add(d)
 }
 
 // DefaultDir resolves the state directory: the LOOPGUARD_CACHE_DIR override,
@@ -128,19 +95,13 @@ func SessionStatePath(dir, id string) string {
 type Store struct {
 	Dir   string
 	Clock Clock
-
-	initOnce sync.Once
-	clock    Clock
 }
 
 func (s *Store) now() time.Time {
-	s.initOnce.Do(func() {
-		if s.Clock == nil {
-			s.Clock = realClock{}
-		}
-		s.clock = s.Clock
-	})
-	return s.clock.Now()
+	if s.Clock != nil {
+		return s.Clock.Now()
+	}
+	return time.Now()
 }
 
 // Now exposes the store's clock (default: real time) for callers that need
@@ -166,7 +127,24 @@ func (s *Store) Load(id string) (*Session, error) {
 	if json.Unmarshal(data, &sess) != nil || sess.Version == 0 {
 		return s.fresh(id), nil
 	}
+	// A newer schema is returned as-is so read-only callers still work;
+	// Update refuses to rewrite it (see below).
 	return &sess, nil
+}
+
+// DecodeArgs parses tool-call arguments. Numbers are decoded as json.Number so
+// fingerprints distinguish large integers that float64 would collapse.
+func DecodeArgs(raw json.RawMessage) (any, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 func (s *Store) fresh(id string) *Session {
@@ -195,6 +173,9 @@ func (s *Store) Update(id string, fn func(*Session)) error {
 	if err != nil {
 		return err
 	}
+	if sess.Version > CurrentVersion {
+		return fmt.Errorf("session %q was written by a newer loop-guard (schema %d); refusing to overwrite", id, sess.Version)
+	}
 	fn(sess)
 	sess.Version = CurrentVersion
 	sess.UpdatedAt = s.now()
@@ -215,13 +196,6 @@ func (s *Store) Update(id string, fn func(*Session)) error {
 		return fmt.Errorf("write session: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		// os.Rename does not replace an existing file on Windows.
-		if runtime.GOOS == "windows" {
-			os.Remove(path)
-			if err2 := os.Rename(tmp, path); err2 == nil {
-				return nil
-			}
-		}
 		return fmt.Errorf("persist session: %w", err)
 	}
 	return nil
@@ -232,21 +206,29 @@ const (
 	lockTimeout      = 3 * time.Second
 )
 
-// lock acquires <id>.lock exclusively, stealing locks older than
-// StaleLockAge. It returns a release func that is always safe to call.
+// lock acquires <id>.lock exclusively, stealing locks older than StaleLockAge.
+// The returned release function removes the lock file only if this process
+// still owns it, so a holder whose stale lock was stolen cannot delete the
+// thief's lock. It is always safe to call.
 func (s *Store) lock(id string) (func(), error) {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return func() {}, err
 	}
 	lockPath := filepath.Join(s.Dir, id+".lock")
+	token := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 	deadline := time.Now().Add(lockTimeout)
 
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
-			fmt.Fprintf(f, "%d\n", os.Getpid())
+			fmt.Fprintln(f, token)
 			f.Close()
-			return func() { os.Remove(lockPath) }, nil
+			return func() {
+				if data, err := os.ReadFile(lockPath); err == nil &&
+					strings.TrimSpace(string(data)) == token {
+					os.Remove(lockPath)
+				}
+			}, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return func() {}, fmt.Errorf("acquire lock: %w", err)

@@ -16,7 +16,21 @@ import (
 	"github.com/bjmiller/loop-guard/internal/version"
 )
 
-const protocolVersion = "2024-11-05"
+const (
+	// latestProtocolVersion is the newest handshake-based MCP revision this
+	// server implements. Newer per-request-versioning clients discover the
+	// server via server/discover and fall back to one of these.
+	latestProtocolVersion = "2025-11-25"
+)
+
+// supportedProtocolVersions are the handshake-based revisions accepted by
+// initialize, newest first.
+var supportedProtocolVersions = []string{
+	"2025-11-25",
+	"2025-06-18",
+	"2025-03-26",
+	"2024-11-05",
+}
 
 // Serve reads newline-delimited JSON-RPC requests until EOF and writes
 // responses to out. cacheDir overrides the state directory; empty means default.
@@ -45,9 +59,20 @@ func Serve(in io.Reader, out io.Writer, cacheDir string) {
 		switch req.Method {
 		case "initialize":
 			writeResult(out, req.ID, map[string]any{
-				"protocolVersion": protocolVersion,
+				"protocolVersion": negotiateProtocolVersion(req.Params),
 				"capabilities":    map[string]any{"tools": map[string]any{}},
-				"serverInfo":      map[string]any{"name": "loop-guard", "version": cliVersion()},
+				"serverInfo":      serverInfo(),
+			})
+		case "server/discover":
+			// Modern (per-request versioning) clients probe with this on
+			// stdio to learn the revisions a legacy server supports.
+			writeResult(out, req.ID, map[string]any{
+				"resultType":        "complete",
+				"supportedVersions": supportedProtocolVersions,
+				"capabilities":      map[string]any{"tools": map[string]any{}},
+				"_meta": map[string]any{
+					"io.modelcontextprotocol/serverInfo": serverInfo(),
+				},
 			})
 		case "ping":
 			writeResult(out, req.ID, map[string]any{})
@@ -59,9 +84,30 @@ func Serve(in io.Reader, out io.Writer, cacheDir string) {
 			writeError(out, req.ID, -32601, fmt.Sprintf("method not found: %s", req.Method))
 		}
 	}
+	if err := sc.Err(); err != nil {
+		writeError(out, nil, -32700, fmt.Sprintf("read error: %v", err))
+	}
 }
 
-func cliVersion() string { return version.Version }
+func serverInfo() map[string]any {
+	return map[string]any{"name": "loop-guard", "version": version.Version}
+}
+
+// negotiateProtocolVersion echoes the client's requested revision when this
+// server supports it, and otherwise offers the newest one it implements.
+func negotiateProtocolVersion(params json.RawMessage) string {
+	var p struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if json.Unmarshal(params, &p) == nil {
+		for _, v := range supportedProtocolVersions {
+			if p.ProtocolVersion == v {
+				return v
+			}
+		}
+	}
+	return latestProtocolVersion
+}
 
 func handleToolCall(out io.Writer, id json.RawMessage, params json.RawMessage, cacheDir string) {
 	var p struct {
@@ -89,8 +135,13 @@ func handleToolCall(out io.Writer, id json.RawMessage, params json.RawMessage, c
 	if dir == "" {
 		dir = args.CacheDir
 	}
+	dir, err := resolveDir(dir)
+	if err != nil {
+		writeToolError(out, id, err.Error())
+		return
+	}
 
-	g := &guard.Guard{Store: &state.Store{Dir: resolveDir(dir)}, Config: detector.Config{}, MaxInterventions: guard.DefaultMaxInterventions}
+	g := &guard.Guard{Store: &state.Store{Dir: dir}, Config: detector.Config{}, MaxInterventions: guard.DefaultMaxInterventions}
 
 	var v guard.Verdict
 	switch p.Name {
@@ -99,11 +150,15 @@ func handleToolCall(out io.Writer, id json.RawMessage, params json.RawMessage, c
 			writeToolError(out, id, "session is required")
 			return
 		}
-		ev := state.Event{Type: args.Type, Name: args.Name, Text: args.Text}
-		if len(args.Args) > 0 {
-			json.Unmarshal(args.Args, &ev.Args)
+		if args.Type != "tool" && args.Type != "response" {
+			writeToolError(out, id, `type must be "tool" or "response"`)
+			return
 		}
-		var err error
+		ev := state.Event{Type: args.Type, Name: args.Name, Text: args.Text}
+		if ev.Args, err = state.DecodeArgs(args.Args); err != nil {
+			writeToolError(out, id, "invalid args: "+err.Error())
+			return
+		}
 		v, err = g.Record(args.Session, ev)
 		if err != nil {
 			writeToolError(out, id, err.Error())
@@ -114,7 +169,11 @@ func handleToolCall(out io.Writer, id json.RawMessage, params json.RawMessage, c
 			writeToolError(out, id, "session is required")
 			return
 		}
-		v = g.Check(args.Session)
+		v, err = g.Check(args.Session)
+		if err != nil {
+			writeToolError(out, id, err.Error())
+			return
+		}
 	default:
 		writeError(out, id, -32602, fmt.Sprintf("unknown tool: %s", p.Name))
 		return
@@ -126,15 +185,15 @@ func handleToolCall(out io.Writer, id json.RawMessage, params json.RawMessage, c
 	})
 }
 
-func resolveDir(dir string) string {
+func resolveDir(dir string) (string, error) {
 	if dir != "" {
-		return dir
+		return dir, nil
 	}
 	d, err := state.DefaultDir()
 	if err != nil {
-		return ".loop-guard"
+		return "", fmt.Errorf("resolve state dir: %w", err)
 	}
-	return d
+	return d, nil
 }
 
 func toolDefs() []map[string]any {

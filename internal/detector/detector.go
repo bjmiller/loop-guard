@@ -115,6 +115,14 @@ func canonicalize(v any) any {
 		}
 		return t
 	case json.Number:
+		// Numbers decoded with UseNumber. Normalize to int64 or float64 so
+		// "1" and 1.0 fingerprint alike, and integers keep exact digits.
+		if i, err := t.Int64(); err == nil {
+			return i
+		}
+		if f, err := t.Float64(); err == nil {
+			return f
+		}
 		return t.String()
 	default:
 		return v
@@ -132,7 +140,7 @@ func Similarity(a, b string) float64 {
 	}
 	inter := 0
 	for t := range at {
-		if bt[t] {
+		if _, ok := bt[t]; ok {
 			inter++
 		}
 	}
@@ -143,13 +151,13 @@ func Similarity(a, b string) float64 {
 	return float64(inter) / float64(union)
 }
 
-func tokens(s string) map[string]bool {
+func tokens(s string) map[string]struct{} {
 	s = strings.ToLower(s)
 	s = nonAlnum.ReplaceAllString(s, " ")
 	fields := strings.Fields(s)
-	set := make(map[string]bool, len(fields))
+	set := make(map[string]struct{}, len(fields))
 	for _, f := range fields {
-		set[f] = true
+		set[f] = struct{}{}
 	}
 	return set
 }

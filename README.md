@@ -21,13 +21,17 @@ enforces from outside the conversation:
 3. **Breaker** — after two ignored interventions, stop talking to the thread,
    write a handoff artifact, and let a fresh session pick up the task.
 
-## Install (local experiment)
+## Install
 
-Nothing is published yet. Build from source:
+Requires Go 1.25 or newer.
 
 ```sh
-go install github.com/bjmiller/loop-guard@latest     # once pushed to a remote
-# or from a checkout:
+go install github.com/bjmiller/loop-guard@latest
+```
+
+From a checkout instead:
+
+```sh
 go build -o /usr/local/bin/loop-guard .
 ```
 
@@ -57,8 +61,23 @@ echo '{"type":"tool","name":"bash","args":{"command":"npm test"}}' \
 | 2    | loop detected   | block the call; feed stderr (the recovery prompt) to the model |
 | 3    | breaker tripped | end the session; show `handoff_path` from stdout JSON          |
 
-Verdict JSON on stdout always accompanies the exit code. `loop-guard check`
-evaluates read-only (never records, never trips the breaker).
+`record` and `check` always print verdict JSON on stdout alongside the exit
+code. Harness adapters own stdout for their hook protocol instead (VS Code
+reads its own JSON; Claude Code must not receive foreign JSON), so they carry
+the message on stderr. `loop-guard check` evaluates read-only (never records,
+never trips the breaker).
+
+Exit 3 is the generic contract; several harnesses cannot "end a session" from a
+hook. The adapters map it onto whatever their hook protocol supports:
+
+| Harness                | Loop (2)                        | Breaker (3)                                                        |
+| ---------------------- | ------------------------------- | ------------------------------------------------------------------ |
+| `record` / custom      | block via exit 2                | exit 3; human ends the session                                     |
+| Claude Code / Codex    | exit 2, stderr to the model     | also exit 2 (the only blocking code), message names the handoff    |
+| Copilot CLI            | exit 2 denies (stderr shown)    | exit 3 also denies, blocking the call                              |
+| VS Code chat           | exit 2, stderr to the model     | exit 0 + `{"continue":false}`, `stopReason` names the handoff      |
+| Pi                     | `{ block: true, reason }`       | same, plus `ctx.abort()` ends the session                          |
+| OpenCode plugin        | thrown error blocks and informs | thrown error; the human restarts from the handoff                  |
 
 State lives in one JSON file per session under the platform cache dir
 (`LOOPGUARD_CACHE_DIR` or `--cache-dir` override), safe for concurrent processes.
@@ -129,16 +148,19 @@ paths vary) contains: what was looping, recent activity, how many
 interventions were ignored, and a suggested restart approach. Seed a **fresh**
 session with this file — never replay the corrupted transcript.
 
-## Distribution strategy (built, unpublished)
+## Distribution
 
-- goreleaser config produces checksummed static binaries for
-  linux/darwin/windows (amd64+arm64) via `goreleaser build --snapshot`.
-- `npm/` contains the esbuild-style launcher package (platform binaries as
-  optionalDependencies) — testable locally with `npm pack`; never published.
-- `Formula/loop-guard.rb` is ready for a Homebrew tap when the time comes.
+- goreleaser builds checksummed static binaries for linux, darwin, and windows
+  (amd64 and arm64). For a local build: `goreleaser build --snapshot --clean`.
+- `npm/` holds the launcher package. It execs the platform binary installed
+  through optionalDependencies, and `npm pack` builds a tarball for local
+  testing.
+- `Formula/loop-guard.rb` is the Homebrew formula template for the
+  `homebrew-loop-guard` tap. It matches goreleaser's output; checksums come
+  from the release `checksums.txt`.
 - The prompt-level skill lives in `skill/avoid-loops/` and installs into any
-  Agent Skills harness (e.g. `npx skills add <path-to-this-repo>`, pointing at
-  `skill/avoid-loops`).
+  Agent Skills harness, for example
+  `npx skills add https://github.com/bjmiller/loop-guard`.
 
 ## Development
 

@@ -83,18 +83,18 @@ func (g *Guard) Record(sessionID string, ev state.Event) (Verdict, error) {
 // session. When a loop is live it reports an inject-class action so harnesses
 // block and instruct; only an actually-tripped breaker yields exit-code-3
 // severity, and projections can never trip it.
-func (g *Guard) Check(sessionID string) Verdict {
+func (g *Guard) Check(sessionID string) (Verdict, error) {
 	cfg := detector.WithDefaults(g.Config) // local copy: Guard may be shared
 	sess, err := g.Store.Load(sessionID)
 	if err != nil {
-		return Verdict{OK: true, Action: ActionAllow}
+		return Verdict{}, err
 	}
 	if sess.Breaker {
-		return g.breakerVerdict(sess)
+		return g.breakerVerdict(sess), nil
 	}
 	d := g.detect(sess, cfg)
 	if !d.Loop {
-		return g.allowVerdict(sess)
+		return g.allowVerdict(sess), nil
 	}
 	action := ActionInjectFinal
 	if sess.Interventions+1 < g.maxInterventions() {
@@ -106,7 +106,7 @@ func (g *Guard) Check(sessionID string) Verdict {
 		MaxInterventions: g.maxInterventions(),
 		Action:           action,
 		Message:          RecoveryMessage(d.Kind, d.Count, sess.Interventions+1 >= g.maxInterventions()),
-	}
+	}, nil
 }
 
 func (g *Guard) allowVerdict(sess *state.Session) Verdict {
@@ -129,23 +129,30 @@ func projectAction(next, max int) string {
 	}
 }
 
-// detect runs both detectors over the stored history tail (the event under
-// evaluation has already been appended by Record).
+// detect runs the detector matching the most recently recorded event. Only the
+// event under evaluation is examined, so a stale loop from the other history
+// (e.g. an old tool fingerprint when a response arrives) can never re-fire and
+// escalate a session that already changed behavior.
 func (g *Guard) detect(sess *state.Session, cfg detector.Config) detector.Verdict {
-	var toolFPS []string
-	var texts []string
+	if len(sess.Events) == 0 {
+		return detector.Verdict{}
+	}
+	if sess.Events[len(sess.Events)-1].Type == "tool" {
+		fps := make([]string, 0, len(sess.Events))
+		for _, e := range sess.Events {
+			if e.Type == "tool" {
+				fps = append(fps, e.Fingerprint)
+			}
+		}
+		return detector.DetectToolLoop(fps, cfg)
+	}
+	texts := make([]string, 0, len(sess.Events))
 	for _, e := range sess.Events {
-		if e.Type == "tool" {
-			toolFPS = append(toolFPS, e.Fingerprint)
-		} else {
+		if e.Type != "tool" {
 			texts = append(texts, e.Text)
 		}
 	}
-	v := detector.DetectToolLoop(toolFPS, cfg)
-	if !v.Loop {
-		v = detector.DetectResponseLoop(texts, cfg)
-	}
-	return v
+	return detector.DetectResponseLoop(texts, cfg)
 }
 
 // escalate applies the ladder step implied by the just-incremented
@@ -185,6 +192,7 @@ func (g *Guard) breakerVerdict(sess *state.Session) Verdict {
 	path := HandoffPathFor(g.Store.Dir, sess.ID)
 	return Verdict{
 		OK:               false,
+		Loop:             true,
 		Kind:             "breaker",
 		Interventions:    sess.Interventions,
 		MaxInterventions: g.maxInterventions(),

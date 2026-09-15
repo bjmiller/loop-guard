@@ -9,9 +9,8 @@ import (
 func cmdInit(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	harness := fs.String("harness", "custom", "which harness: custom, claude, opencode, codex, copilot, pi, or vscode")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "loop-guard init: %v\n", err)
-		return exitErr
+	if code, ok := parseFlags(fs, args, "init", stderr); !ok {
+		return code
 	}
 
 	switch *harness {
@@ -80,7 +79,10 @@ Claude Code setup (manual)
 
 Claude passes {"session_id","tool_name","tool_input"} on stdin; the adapter maps
 it onto ` + "`record`" + `. Exit code 2 blocks the tool call and feeds stderr back
-to Claude as feedback — exactly the recovery prompt.
+to Claude as feedback — exactly the recovery prompt. A tripped breaker takes the
+same exit-2 path: Claude Code hooks cannot end a session by exit code alone, so
+the adapter blocks every subsequent call and the message names the handoff
+artifact to restart from.
 `
 
 const opencodeInstructions = cliContract + `
@@ -154,8 +156,9 @@ Manual steps if you prefer:
 3. Trust the hook: run /hooks inside Codex and approve it (Codex >= 0.129
    refuses to run untrusted hooks).
 
-Exit code 3 (breaker) blocks the call and the recovery message names the
-handoff artifact; end the session manually and restart fresh from that file.
+A tripped breaker also exits 2: the call is blocked and the recovery message
+names the handoff artifact. End the session manually and restart fresh from
+that file.
 `
 
 const copilotInstructions = cliContract + `

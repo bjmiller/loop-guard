@@ -1,6 +1,7 @@
 package state_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,6 +83,23 @@ var _ = Describe("Store", func() {
 			s, err := store.Load("broken")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(s.Events).To(HaveLen(1))
+		})
+
+		It("refuses to overwrite state written by a newer schema", func() {
+			path := filepath.Join(dir, "future.json")
+			future := fmt.Sprintf(`{"version":%d,"id":"future","events":[]}`, state.CurrentVersion+1)
+			Expect(os.WriteFile(path, []byte(future), 0o600)).To(Succeed())
+
+			s, err := store.Load("future")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(s.Version).To(Equal(state.CurrentVersion + 1)) // readable as-is
+
+			Expect(store.Update("future", func(*state.Session) {})).
+				To(MatchError(ContainSubstring("newer loop-guard")))
+
+			data, err := os.ReadFile(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(data)).To(Equal(future)) // untouched
 		})
 	})
 

@@ -1,6 +1,8 @@
 package detector_test
 
 import (
+	"encoding/json"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -31,6 +33,21 @@ var _ = Describe("ToolFingerprint", func() {
 	It("handles non-map args including nil and strings", func() {
 		Expect(detector.ToolFingerprint("t", nil)).NotTo(BeEmpty())
 		Expect(detector.ToolFingerprint("t", "raw string")).NotTo(BeEmpty())
+	})
+
+	It("treats json.Number and float64 spellings of the same value alike", func() {
+		Expect(detector.ToolFingerprint("t", json.Number("1"))).
+			To(Equal(detector.ToolFingerprint("t", 1.0)))
+		Expect(detector.ToolFingerprint("t", json.Number("1.0"))).
+			To(Equal(detector.ToolFingerprint("t", 1.0)))
+		Expect(detector.ToolFingerprint("t", json.Number("1"))).
+			NotTo(Equal(detector.ToolFingerprint("t", json.Number("2"))))
+	})
+
+	It("keeps large integer args distinct", func() {
+		a := detector.ToolFingerprint("t", json.Number("1758000000000000001"))
+		b := detector.ToolFingerprint("t", json.Number("1758000000000000002"))
+		Expect(a).NotTo(Equal(b))
 	})
 })
 

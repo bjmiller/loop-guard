@@ -1,4 +1,4 @@
-# npm distribution (built locally; never published while experimental)
+# npm distribution
 
 This directory contains the launcher-package structure for distributing the
 Go binary through npm with registry-verified integrity — no curl-pipe-shell.

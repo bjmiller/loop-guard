@@ -157,9 +157,8 @@ var _ = Describe("claude-hook", func() {
 	It("maps Claude hook payloads onto record semantics", func() {
 		code, out, _ := runCLIWithStdin(claudeHookJSON, "claude-hook")
 		Expect(code).To(Equal(0))
-		var v map[string]any
-		Expect(json.Unmarshal([]byte(out), &v)).To(Succeed())
-		Expect(v["action"]).To(Equal("allow"))
+		// stdout must stay clean: these harnesses parse it as hook-decision JSON.
+		Expect(out).To(BeEmpty())
 
 		data, err := os.ReadFile(filepath.Join(cacheDir, "cl-123.json"))
 		Expect(err).NotTo(HaveOccurred())
@@ -170,20 +169,22 @@ var _ = Describe("claude-hook", func() {
 		runCLIWithStdin(claudeHookJSON, "claude-hook")
 		runCLIWithStdin(claudeHookJSON, "claude-hook")
 		runCLIWithStdin(claudeHookJSON, "claude-hook") // 3rd: first detection
-		code, _, stderr := runCLIWithStdin(claudeHookJSON, "claude-hook")
+		code, out, stderr := runCLIWithStdin(claudeHookJSON, "claude-hook")
 		Expect(code).To(Equal(2))
+		Expect(out).To(BeEmpty())
 		Expect(stderr).NotTo(BeEmpty())
 	})
 
-	It("trips the breaker with exit 3 on the third detection", func() {
+	It("blocks with exit 2 and names the handoff artifact when the breaker trips", func() {
 		for i := 0; i < 5; i++ {
 			runCLIWithStdin(claudeHookJSON, "claude-hook")
 		}
-		code, out, _ := runCLIWithStdin(claudeHookJSON, "claude-hook")
-		Expect(code).To(Equal(3))
-		var v map[string]any
-		Expect(json.Unmarshal([]byte(out), &v)).To(Succeed())
-		Expect(v["handoff_path"]).NotTo(BeEmpty())
+		code, out, stderr := runCLIWithStdin(claudeHookJSON, "claude-hook")
+		// Exit 3 would be a non-blocking warning in Claude Code; exit 2 is the
+		// only code that blocks the call and shows the model the message.
+		Expect(code).To(Equal(2))
+		Expect(out).To(BeEmpty())
+		Expect(stderr).To(ContainSubstring("handoff"))
 	})
 
 	It("fails cleanly on malformed hook input", func() {
@@ -195,8 +196,7 @@ var _ = Describe("claude-hook", func() {
 		custom := GinkgoT().TempDir()
 		code, out, _ := runCLIWithStdin(claudeHookJSON, "claude-hook", "--cache-dir", custom)
 		Expect(code).To(Equal(0))
-		var v map[string]any
-		Expect(json.Unmarshal([]byte(out), &v)).To(Succeed())
+		Expect(out).To(BeEmpty())
 
 		data, err := os.ReadFile(filepath.Join(custom, "cl-123.json"))
 		Expect(err).NotTo(HaveOccurred())
@@ -217,5 +217,11 @@ var _ = Describe("usage errors", func() {
 		code, _, stderr := runCLI("bogus-command")
 		Expect(code).To(Equal(1))
 		Expect(stderr).NotTo(BeEmpty())
+	})
+
+	It("prints flag help to the injected stderr and exits 0", func() {
+		code, _, stderr := runCLI("record", "-h")
+		Expect(code).To(Equal(0))
+		Expect(stderr).To(ContainSubstring("-session"))
 	})
 })

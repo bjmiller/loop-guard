@@ -8,6 +8,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,9 +18,6 @@ import (
 	"github.com/bjmiller/loop-guard/internal/state"
 	"github.com/bjmiller/loop-guard/internal/version"
 )
-
-// Version is stamped at build time via -ldflags.
-var Version = version.Version
 
 // Event is the stdin payload accepted by `record`.
 type Event struct {
@@ -40,46 +38,61 @@ type claudeHookInput struct {
 // Field names have varied across Copilot versions, so both camelCase and
 // snake_case spellings are accepted for every field.
 type copilotHookInput struct {
-	SessionID  string          `json:"sessionId"`
-	SessionID2 string          `json:"session_id"`
-	ToolName   string          `json:"toolName"`
-	ToolName2  string          `json:"tool_name"`
-	ToolInput  json.RawMessage `json:"toolInput"`
-	ToolInput2 json.RawMessage `json:"tool_input"`
-	Input      json.RawMessage `json:"input"`
-	Args       json.RawMessage `json:"args"`
-
-	// conversationId is the most stable per-conversation identifier Copilot
-	// has exposed in hook payloads; it wins over sessionId when present.
-	ConversationID string `json:"conversationId"`
+	Session      string
+	Conversation string
+	ToolName     string
+	ToolArgs     json.RawMessage
 }
 
-func (h copilotHookInput) session() string {
-	if h.ConversationID != "" {
-		return h.ConversationID
+func (h *copilotHookInput) UnmarshalJSON(data []byte) error {
+	var camel struct {
+		SessionID      string          `json:"sessionId"`
+		ConversationID string          `json:"conversationId"`
+		ToolName       string          `json:"toolName"`
+		ToolInput      json.RawMessage `json:"toolInput"`
 	}
-	if h.SessionID != "" {
-		return h.SessionID
+	var snake struct {
+		SessionID string          `json:"session_id"`
+		ToolName  string          `json:"tool_name"`
+		ToolInput json.RawMessage `json:"tool_input"`
+		Input     json.RawMessage `json:"input"`
+		Args      json.RawMessage `json:"args"`
 	}
-	return h.SessionID2
+	if err := json.Unmarshal(data, &camel); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, &snake); err != nil {
+		return err
+	}
+	h.Conversation = camel.ConversationID
+	h.Session = firstNonEmpty(camel.SessionID, snake.SessionID)
+	h.ToolName = firstNonEmpty(camel.ToolName, snake.ToolName)
+	for _, raw := range []json.RawMessage{camel.ToolInput, snake.ToolInput, snake.Input, snake.Args} {
+		if len(raw) > 0 {
+			h.ToolArgs = raw
+			break
+		}
+	}
+	return nil
 }
 
-func (h copilotHookInput) tool() (string, json.RawMessage) {
-	name := h.ToolName
-	if name == "" {
-		name = h.ToolName2
+// ID returns the best available session identifier. conversationId is the
+// most stable per-conversation identifier Copilot has exposed; it wins over
+// session ids when present.
+func (h copilotHookInput) ID() string {
+	if h.Conversation != "" {
+		return h.Conversation
 	}
-	args := h.ToolInput
-	if len(args) == 0 {
-		args = h.ToolInput2
+	return h.Session
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
 	}
-	if len(args) == 0 {
-		args = h.Input
-	}
-	if len(args) == 0 {
-		args = h.Args
-	}
-	return name, args
+	return ""
 }
 
 // Run executes one command and returns the process exit code.
@@ -106,7 +119,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "serve":
 		return cmdServe(args[1:], stdin, stdout, stderr)
 	case "version", "--version", "-v":
-		fmt.Fprintf(stdout, "loop-guard %s\n", Version)
+		fmt.Fprintf(stdout, "loop-guard %s\n", version.Version)
 		return 0
 	default:
 		fmt.Fprintf(stderr, "loop-guard: unknown command %q\n\n", args[0])
@@ -157,6 +170,21 @@ func fsFor(name string) (*flag.FlagSet, *string, *string, *detector.Config, *int
 	return fs, session, cacheDir, cfg, maxInj
 }
 
+// parseFlags parses fs with errors and help text routed to stderr. It returns
+// (code, false) when the caller must return code immediately; -h is a clean
+// exit 0 rather than an error.
+func parseFlags(fs *flag.FlagSet, args []string, cmd string, stderr io.Writer) (int, bool) {
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK, false
+		}
+		fmt.Fprintf(stderr, "loop-guard %s: %v\n", cmd, err)
+		return exitErr, false
+	}
+	return exitOK, true
+}
+
 func newGuard(cacheDir string, cfg detector.Config, maxInj int) (*guard.Guard, error) {
 	dir := cacheDir
 	if dir == "" {
@@ -195,19 +223,16 @@ const (
 	exitBreaker = 3
 )
 
-func readAll(r io.Reader) ([]byte, error) { return io.ReadAll(r) }
-
 func cmdRecord(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs, session, cacheDir, cfg, maxInj := fsFor("record")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "loop-guard record: %v\n", err)
-		return exitErr
+	if code, ok := parseFlags(fs, args, "record", stderr); !ok {
+		return code
 	}
 	if *session == "" {
 		fmt.Fprintln(stderr, "loop-guard record: --session is required")
 		return exitErr
 	}
-	raw, err := readAll(stdin)
+	raw, err := io.ReadAll(stdin)
 	if err != nil || len(raw) == 0 {
 		fmt.Fprintln(stderr, "loop-guard record: expected an event JSON object on stdin")
 		return exitErr
@@ -240,11 +265,9 @@ func cmdRecord(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 func toStateEvent(ev Event) (state.Event, error) {
 	switch ev.Type {
 	case "tool":
-		var args any
-		if len(ev.Args) > 0 {
-			if err := json.Unmarshal(ev.Args, &args); err != nil {
-				return state.Event{}, fmt.Errorf("parse args: %w", err)
-			}
+		args, err := state.DecodeArgs(ev.Args)
+		if err != nil {
+			return state.Event{}, fmt.Errorf("parse args: %w", err)
 		}
 		return state.Event{Type: "tool", Name: ev.Name, Args: args}, nil
 	case "response":
@@ -256,9 +279,8 @@ func toStateEvent(ev Event) (state.Event, error) {
 
 func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	fs, session, cacheDir, cfg, maxInj := fsFor("check")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "loop-guard check: %v\n", err)
-		return exitErr
+	if code, ok := parseFlags(fs, args, "check", stderr); !ok {
+		return code
 	}
 	if *session == "" {
 		fmt.Fprintln(stderr, "loop-guard check: --session is required")
@@ -269,17 +291,26 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "loop-guard check: %v\n", err)
 		return exitErr
 	}
-	return emitVerdict(g.Check(*session), stdout, stderr)
-}
-
-func cmdClaudeHook(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("claude-hook", flag.ContinueOnError)
-	cacheDir := fs.String("cache-dir", "", "state directory override")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "loop-guard claude-hook: %v\n", err)
+	v, err := g.Check(*session)
+	if err != nil {
+		fmt.Fprintf(stderr, "loop-guard check: %v\n", err)
 		return exitErr
 	}
-	raw, err := readAll(stdin)
+	return emitVerdict(v, stdout, stderr)
+}
+
+// cmdClaudeHook adapts Claude Code's and Codex's PreToolUse hooks. Both block
+// the tool call only on exit 2 and feed stderr to the model, so the breaker
+// takes the same path as a loop intervention: blocking the call is the only
+// way to make it stop. stdout is left empty because these harnesses parse it
+// as hook-decision JSON.
+func cmdClaudeHook(args []string, stdin io.Reader, _ io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("claude-hook", flag.ContinueOnError)
+	cacheDir := fs.String("cache-dir", "", "state directory override")
+	if code, ok := parseFlags(fs, args, "claude-hook", stderr); !ok {
+		return code
+	}
+	raw, err := io.ReadAll(stdin)
 	if err != nil || len(raw) == 0 {
 		fmt.Fprintln(stderr, "loop-guard claude-hook: expected hook JSON on stdin")
 		return exitErr
@@ -308,31 +339,35 @@ func cmdClaudeHook(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "loop-guard claude-hook: %v\n", err)
 		return exitErr
 	}
-	return emitVerdict(v, stdout, stderr)
+
+	switch v.Action {
+	case guard.ActionInject, guard.ActionInjectFinal, guard.ActionBreaker:
+		fmt.Fprintln(stderr, v.Message)
+		return exitLoop
+	default:
+		return exitOK
+	}
 }
 
 func rawArgs(raw json.RawMessage) any {
-	if len(raw) == 0 {
-		return nil
+	v, err := state.DecodeArgs(raw)
+	if err != nil {
+		return string(raw)
 	}
-	var v any
-	if json.Unmarshal(raw, &v) == nil {
-		return v
-	}
-	return string(raw)
+	return v
 }
 
 // cmdCopilotHook adapts GitHub Copilot CLI's preToolUse hook onto record
-// semantics. It shares the exit-code contract with claude-hook: 0 allow,
-// 2 block (stderr holds the recovery prompt), 3 breaker tripped, 1 error.
+// semantics. preToolUse is fail-closed there (any non-zero exit denies), so it
+// shares the claude-hook adapter's contract: 0 allow, 2 block with the
+// recovery prompt on stderr, 1 error.
 func cmdCopilotHook(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("copilot-hook", flag.ContinueOnError)
 	cacheDir := fs.String("cache-dir", "", "state directory override")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "loop-guard copilot-hook: %v\n", err)
-		return exitErr
+	if code, ok := parseFlags(fs, args, "copilot-hook", stderr); !ok {
+		return code
 	}
-	raw, err := readAll(stdin)
+	raw, err := io.ReadAll(stdin)
 	if err != nil || len(raw) == 0 {
 		fmt.Fprintf(stderr, "loop-guard copilot-hook: expected hook JSON on stdin")
 		return exitErr
@@ -342,9 +377,8 @@ func cmdCopilotHook(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "loop-guard copilot-hook: parse hook input: %v\n", err)
 		return exitErr
 	}
-	session := h.session()
-	name, toolArgs := h.tool()
-	if session == "" || name == "" {
+	session := h.ID()
+	if session == "" || h.ToolName == "" {
 		fmt.Fprintf(stderr, "loop-guard copilot-hook: hook input needs a session/conversation id and a tool name")
 		return exitErr
 	}
@@ -356,8 +390,8 @@ func cmdCopilotHook(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	}
 	v, err := g.Record(session, state.Event{
 		Type: "tool",
-		Name: name,
-		Args: rawArgs(toolArgs),
+		Name: h.ToolName,
+		Args: rawArgs(h.ToolArgs),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "loop-guard copilot-hook: %v\n", err)
@@ -387,11 +421,10 @@ type vscodeOutput struct {
 func cmdVSCodeHook(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("vscode-hook", flag.ContinueOnError)
 	cacheDir := fs.String("cache-dir", "", "state directory override")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "loop-guard vscode-hook: %v\n", err)
-		return exitErr
+	if code, ok := parseFlags(fs, args, "vscode-hook", stderr); !ok {
+		return code
 	}
-	raw, err := readAll(stdin)
+	raw, err := io.ReadAll(stdin)
 	if err != nil || len(raw) == 0 {
 		fmt.Fprintln(stderr, "loop-guard vscode-hook: expected hook JSON on stdin")
 		return exitErr

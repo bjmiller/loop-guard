@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bjmiller/loop-guard/internal/state"
 )
@@ -108,11 +109,11 @@ func kindFor(e state.Event) string {
 
 // describe renders one event on a single line, truncated for readability.
 func describe(e state.Event) string {
-	const max = 120
+	const maxRunes = 120
 	trunc := func(s string) string {
 		s = strings.ReplaceAll(s, "|", "\\|")
-		if len(s) > max {
-			return s[:max] + "…"
+		if utf8.RuneCountInString(s) > maxRunes {
+			s = string([]rune(s)[:maxRunes]) + "…"
 		}
 		return s
 	}

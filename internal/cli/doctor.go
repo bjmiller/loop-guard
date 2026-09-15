@@ -1,15 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"github.com/bjmiller/loop-guard/internal/state"
@@ -42,10 +43,11 @@ func DefaultPaths() Paths {
 }
 
 type harnessStatus struct {
-	Name     string
-	Detected bool
-	Wired    bool
-	Detail   string
+	Name      string
+	Detected  bool
+	Wired     bool
+	Universal bool // no config file: usable through a generic mechanism
+	Detail    string
 }
 
 func claudeSettingsPath(p Paths) string {
@@ -60,7 +62,7 @@ func openCodeProjectRoot(p Paths) string {
 	return filepath.Join(p.WorkDir, ".opencode")
 }
 
-var openCodePluginRelPath = filepath.Join("plugins", "loop-guard.js")
+const openCodePluginRelPath = "plugins/loop-guard.js"
 
 // Codex: hooks.json at user (~/.codex) or project (.codex) level.
 func codexUserRoot(p Paths) string { return filepath.Join(p.Home, ".codex") }
@@ -139,7 +141,7 @@ func chatGPTDesktopDir(p Paths) string {
 	return filepath.Join(p.Home, ".config", "ChatGPT")
 }
 
-var (
+const (
 	piExtensionFileName = "loop-guard.ts"
 	copilotHookJSONName = "loop-guard-hooks.json"
 	vscodeHookJSONName  = "loop-guard.json"
@@ -176,20 +178,9 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func indexOf(haystack, needle []byte) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		match := true
-		for j := range needle {
-			if haystack[i+j] != needle[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
+func fileContains(path, substr string) bool {
+	data, err := os.ReadFile(path)
+	return err == nil && bytes.Contains(data, []byte(substr))
 }
 
 // claudeWired reports whether settingsPath already carries a loop-guard hook.
@@ -222,7 +213,7 @@ func claudeWired(settingsPath string) bool {
 		return false
 	}
 	// Not valid JSON: fall back to substring scan.
-	return indexOf(data, []byte("loop-guard")) >= 0
+	return bytes.Contains(data, []byte("loop-guard"))
 }
 
 // codexWired reports whether a Codex hooks.json already carries a loop-guard
@@ -233,8 +224,8 @@ func codexWired(hooksPath string) bool {
 	if err != nil {
 		return false
 	}
-	return indexOf(data, []byte("loop-guard")) >= 0 ||
-		indexOf(data, []byte("claude-hook")) >= 0
+	return bytes.Contains(data, []byte("loop-guard")) ||
+		bytes.Contains(data, []byte("claude-hook"))
 }
 
 // copilotWired reports whether a Copilot CLI hooks config already references
@@ -244,13 +235,8 @@ func copilotWired(hooksPath string) bool {
 	if err != nil {
 		return false
 	}
-	return indexOf(data, []byte("loop-guard")) >= 0 ||
-		indexOf(data, []byte("copilot-hook")) >= 0
-}
-
-func fileContains(path, substr string) bool {
-	data, err := os.ReadFile(path)
-	return err == nil && indexOf(data, []byte(substr)) >= 0
+	return bytes.Contains(data, []byte("loop-guard")) ||
+		bytes.Contains(data, []byte("copilot-hook"))
 }
 
 // nativeVSCodeWired reports whether our VS Code-format hook file already
@@ -370,10 +356,9 @@ func detectHarnesses(p Paths) []harnessStatus {
 			Detail:   filepath.Join(opProject, openCodePluginRelPath),
 		},
 		{
-			Name:     "any-MCP-harness",
-			Detected: false,
-			Wired:    false,
-			Detail:   `register MCP server: loop-guard serve`,
+			Name:      "any-MCP-harness",
+			Universal: true,
+			Detail:    `register MCP server: loop-guard serve`,
 		},
 	}
 }
@@ -382,15 +367,14 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fix := fs.Bool("fix", false, "install adapters into detected harnesses")
 	cacheDir := fs.String("cache-dir", "", "state directory override")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "loop-guard doctor: %v\n", err)
-		return exitErr
+	if code, ok := parseFlags(fs, args, "doctor", stderr); !ok {
+		return code
 	}
 	p := DefaultPaths()
 
 	dir := *cacheDir
 	if dir == "" {
-		d, err := stateDefaultDir()
+		d, err := state.DefaultDir()
 		if err != nil {
 			fmt.Fprintf(stderr, "loop-guard doctor: %v\n", err)
 			return exitErr
@@ -410,7 +394,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) int {
 			stateStr = "wired"
 		case h.Detected:
 			stateStr = "detected, NOT wired"
-		case h.Name == "any-MCP-harness":
+		case h.Universal:
 			stateStr = "universal fallback available"
 		}
 		fmt.Fprintf(stdout, "%-22s %-30s (%s)\n", h.Name, stateStr, h.Detail)
@@ -435,8 +419,6 @@ func writableLabel(ok bool) string {
 	}
 	return "NOT writable"
 }
-
-func stateDefaultDir() (string, error) { return state.DefaultDir() }
 
 // ResolveLoopGuardBin determines the absolute path of the loop-guard binary
 // to embed in generated harness configs. Order:
@@ -566,23 +548,101 @@ func installOpenCodePlugin(root string) error {
 	return os.WriteFile(target, []byte(source), 0o644)
 }
 
-// claudeCommand is the shell command embedded in Claude Code hook configs.
-// It uses the resolved absolute path so PATH is irrelevant; the path is
-// quoted for safety on all platforms.
-func claudeCommand() string {
-	return strconv.Quote(ResolveLoopGuardBin()) + " claude-hook"
+// shellQuote quotes s for the platform command shell used by the harnesses.
+// POSIX shells get single quotes (a literal ' becomes '\”); Windows gets
+// double quotes, and % is escaped because cmd.exe expands it even inside
+// quotes.
+func shellQuote(s string) string {
+	if runtime.GOOS == "windows" {
+		return `"` + strings.ReplaceAll(s, "%", "%%") + `"`
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-func codexCommand() string {
-	return strconv.Quote(ResolveLoopGuardBin()) + " claude-hook"
+// binCommand is the shell command embedded in generated hook configs. It uses
+// the resolved absolute path so PATH is irrelevant, quoted for the shell.
+func binCommand(adapter string) string {
+	return shellQuote(ResolveLoopGuardBin()) + " " + adapter
 }
 
-func copilotCommand() string {
-	return strconv.Quote(ResolveLoopGuardBin()) + " copilot-hook"
+func claudeCommand() string  { return binCommand("claude-hook") }
+func codexCommand() string   { return binCommand("claude-hook") }
+func copilotCommand() string { return binCommand("copilot-hook") }
+func vscodeCommand() string  { return binCommand("vscode-hook") }
+
+// readJSONOrEmpty loads path as a JSON object. A missing file yields an empty
+// map; an existing file is backed up to path+".bak-loopguard" before any
+// modification. Invalid JSON is refused rather than overwritten.
+func readJSONOrEmpty(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	config := map[string]any{}
+	if json.Unmarshal(data, &config) != nil {
+		return nil, fmt.Errorf("%s is not valid JSON; refusing to modify", path)
+	}
+	if backupErr := os.WriteFile(path+".bak-loopguard", data, 0o600); backupErr != nil {
+		return nil, fmt.Errorf("backup %s.bak-loopguard: %w", path, backupErr)
+	}
+	return config, nil
 }
 
-func vscodeCommand() string {
-	return strconv.Quote(ResolveLoopGuardBin()) + " vscode-hook"
+// appendHookEntry appends entry to config["hooks"][event], creating missing
+// containers. Unexpected JSON shapes are an error instead of being silently
+// replaced, which would discard another tool's configuration.
+func appendHookEntry(config map[string]any, event string, entry map[string]any) error {
+	hooks, err := objectField(config, "hooks")
+	if err != nil {
+		return err
+	}
+	existing, err := arrayField(hooks, event)
+	if err != nil {
+		return err
+	}
+	hooks[event] = append(existing, entry)
+	return nil
+}
+
+func objectField(parent map[string]any, key string) (map[string]any, error) {
+	v, ok := parent[key]
+	if !ok || v == nil {
+		obj := map[string]any{}
+		parent[key] = obj
+		return obj, nil
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected JSON type for %q: want object", key)
+	}
+	return obj, nil
+}
+
+func arrayField(parent map[string]any, key string) ([]any, error) {
+	v, ok := parent[key]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected JSON type for %q: want array", key)
+	}
+	return list, nil
+}
+
+// writeJSON writes v to path as indented JSON, creating parent directories.
+func writeJSON(path string, v any) error {
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o600)
 }
 
 func wireClaudeHook(settingsPath string) error {
@@ -606,42 +666,17 @@ func wireClaudeStyleHooks(path string, alreadyWired func(string) bool, hook map[
 	if alreadyWired(path) {
 		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	existed := err == nil
-
-	settings := map[string]any{}
-	if existed {
-		if json.Unmarshal(data, &settings) != nil {
-			return fmt.Errorf("%s is not valid JSON; refusing to modify", path)
-		}
-		backup := path + ".bak-loopguard"
-		if backupErr := os.WriteFile(backup, data, 0o600); backupErr != nil {
-			return fmt.Errorf("backup %s: %w", backup, backupErr)
-		}
-	}
-
-	hooks, _ := settings["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = map[string]any{}
-		settings["hooks"] = hooks
-	}
-	pre, _ := hooks["PreToolUse"].([]any)
-	hooks["PreToolUse"] = append(pre, map[string]any{
-		"matcher": "*",
-		"hooks":   []any{hook},
-	})
-
-	out, err := json.MarshalIndent(settings, "", "  ")
+	settings, err := readJSONOrEmpty(path)
 	if err != nil {
 		return err
 	}
-	if mkErr := os.MkdirAll(filepath.Dir(path), 0o755); mkErr != nil {
-		return mkErr
+	if err := appendHookEntry(settings, "PreToolUse", map[string]any{
+		"matcher": "*",
+		"hooks":   []any{hook},
+	}); err != nil {
+		return err
 	}
-	return os.WriteFile(path, out, 0o600)
+	return writeJSON(path, settings)
 }
 
 // wireCopilotHook registers loop-guard's preToolUse hook in a Copilot CLI
@@ -651,44 +686,20 @@ func wireCopilotHook(hooksDir string) error {
 	if copilotWired(path) {
 		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
+	config, err := readJSONOrEmpty(path)
+	if err != nil {
 		return err
-	}
-	existed := err == nil
-
-	config := map[string]any{}
-	if existed {
-		if json.Unmarshal(data, &config) != nil {
-			return fmt.Errorf("%s is not valid JSON; refusing to modify", path)
-		}
-		backup := path + ".bak-loopguard"
-		if backupErr := os.WriteFile(backup, data, 0o600); backupErr != nil {
-			return fmt.Errorf("backup %s: %w", backup, backupErr)
-		}
 	}
 	if _, ok := config["version"]; !ok {
 		config["version"] = 1
 	}
-	hooks, _ := config["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = map[string]any{}
-		config["hooks"] = hooks
-	}
-	pre, _ := hooks["preToolUse"].([]any)
-	hooks["preToolUse"] = append(pre, map[string]any{
+	if err := appendHookEntry(config, "preToolUse", map[string]any{
 		"type": "command",
 		"bash": copilotCommand(),
-	})
-
-	out, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
+	}); err != nil {
 		return err
 	}
-	if mkErr := os.MkdirAll(hooksDir, 0o755); mkErr != nil {
-		return mkErr
-	}
-	return os.WriteFile(path, out, 0o600)
+	return writeJSON(path, config)
 }
 
 // wireVSCodeHook merges a PreToolUse entry into VS Code's flat hook format
@@ -697,44 +708,20 @@ func wireCopilotHook(hooksDir string) error {
 // call.
 func wireVSCodeHook(hooksDir string) error {
 	path := filepath.Join(hooksDir, vscodeHookJSONName)
-	data, err := os.ReadFile(path)
-	if err == nil && (indexOf(data, []byte("loop-guard")) >= 0 ||
-		indexOf(data, []byte("vscode-hook")) >= 0) {
+	if fileContains(path, "loop-guard") || fileContains(path, "vscode-hook") {
 		return nil
 	}
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	config := map[string]any{}
-	if err == nil {
-		if json.Unmarshal(data, &config) != nil {
-			return fmt.Errorf("%s is not valid JSON; refusing to modify", path)
-		}
-		backup := path + ".bak-loopguard"
-		if backupErr := os.WriteFile(backup, data, 0o600); backupErr != nil {
-			return fmt.Errorf("backup %s: %w", backup, backupErr)
-		}
-	}
-	hooks, _ := config["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = map[string]any{}
-		config["hooks"] = hooks
-	}
-	pre, _ := hooks["PreToolUse"].([]any)
-	hooks["PreToolUse"] = append(pre, map[string]any{
-		"type":    "command",
-		"command": vscodeCommand(),
-	})
-
-	out, err := json.MarshalIndent(config, "", "  ")
+	config, err := readJSONOrEmpty(path)
 	if err != nil {
 		return err
 	}
-	if mkErr := os.MkdirAll(hooksDir, 0o755); mkErr != nil {
-		return mkErr
+	if err := appendHookEntry(config, "PreToolUse", map[string]any{
+		"type":    "command",
+		"command": vscodeCommand(),
+	}); err != nil {
+		return err
 	}
-	return os.WriteFile(path, out, 0o600)
+	return writeJSON(path, config)
 }
 
 // installPiExtension writes the embedded Pi extension with the resolved

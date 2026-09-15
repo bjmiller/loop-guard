@@ -143,6 +143,41 @@ var _ = Describe("Guard", func() {
 		})
 	})
 
+	Describe("event-kind scoping", func() {
+		sameCall := func() state.Event {
+			return toolEvent("bash", map[string]any{"command": "flaky-test --retry"})
+		}
+
+		It("does not re-trigger a tool loop on a later response event", func() {
+			for i := 0; i < 3; i++ { // interventions reach 1
+				_, err := g.Record("k1", sameCall())
+				Expect(err).NotTo(HaveOccurred())
+			}
+			v, err := g.Record("k1", state.Event{Type: "response", Text: "Changing approach: reading the failing test file instead."})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v.Action).To(Equal(guard.ActionAllow))
+			Expect(v.Interventions).To(Equal(1))
+		})
+
+		It("does not re-trigger a response loop on later unrelated tool calls", func() {
+			texts := []string{
+				"The build failed because the test suite timed out after thirty seconds.",
+				"The build FAILED because the test suite TIMED OUT after thirty seconds!",
+				"The build failed because the test suite timed out after thirty seconds",
+			}
+			for _, t := range texts { // interventions reach 1
+				_, err := g.Record("k2", state.Event{Type: "response", Text: t})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			for _, name := range []string{"read", "grep"} {
+				v, err := g.Record("k2", toolEvent(name, map[string]any{"path": "/x"}))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(v.Action).To(Equal(guard.ActionAllow))
+				Expect(v.Interventions).To(Equal(1))
+			}
+		})
+	})
+
 	Describe("Check", func() {
 		It("evaluates without mutating state", func() {
 			for i := 0; i < 4; i++ { // interventions reach 2, breaker not yet tripped
@@ -153,7 +188,8 @@ var _ = Describe("Guard", func() {
 			before, _ := store.Load("s7")
 			Expect(before.Interventions).To(Equal(2))
 
-			v := g.Check("s7")
+			v, err := g.Check("s7")
+			Expect(err).NotTo(HaveOccurred())
 			Expect(v.Loop).To(BeTrue())
 			Expect(v.Action).To(Equal(guard.ActionInjectFinal)) // live loop blocks; projections never claim breaker
 
@@ -163,8 +199,14 @@ var _ = Describe("Guard", func() {
 		})
 
 		It("returns an allow verdict for empty sessions", func() {
-			v := g.Check("nope")
+			v, err := g.Check("nope")
+			Expect(err).NotTo(HaveOccurred())
 			Expect(v.Action).To(Equal(guard.ActionAllow))
+		})
+
+		It("reports an error for an invalid session id", func() {
+			_, err := g.Check("../escape")
+			Expect(err).To(MatchError(state.ErrInvalidSessionID))
 		})
 	})
 })

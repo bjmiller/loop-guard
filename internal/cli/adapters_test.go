@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -14,33 +14,86 @@ import (
 	"github.com/bjmiller/loop-guard/internal/cli"
 )
 
-// isolateHome points HOME/USERPROFILE/XDG_CONFIG_HOME at a temp dir and
-// restores them when the test finishes.
+// isolateHome points HOME/USERPROFILE/XDG_CONFIG_HOME (and the Windows app
+// data vars) at a temp dir and restores them when the test finishes.
 func isolateHome() string {
 	dir := GinkgoT().TempDir()
+	keys := []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA", "COPILOT_HOME", "LOOPGUARD_BINARY"}
 	old := map[string]string{}
-	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+	for _, key := range keys {
 		old[key] = os.Getenv(key)
 	}
 	expectNoErr(os.Setenv("HOME", dir))
 	if isWindows() {
 		expectNoErr(os.Setenv("USERPROFILE", dir))
+		expectNoErr(os.Setenv("APPDATA", dir))
+		expectNoErr(os.Setenv("LOCALAPPDATA", dir))
 	} else {
 		os.Unsetenv("USERPROFILE")
+		os.Unsetenv("APPDATA")
+		os.Unsetenv("LOCALAPPDATA")
 	}
+	os.Unsetenv("COPILOT_HOME")
+	os.Unsetenv("LOOPGUARD_BINARY")
 	expectNoErr(os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config")))
 	DeferCleanup(func() {
 		for k, v := range old {
-			os.Setenv(k, v)
+			if v == "" {
+				os.Unsetenv(k)
+			} else {
+				os.Setenv(k, v)
+			}
 		}
 	})
 	return dir
 }
 
-func isWindows() bool { return strings.EqualFold(os.Getenv("OS"), "windows_nt") }
+// chdirTo moves into dir and restores the original working directory after
+// the spec, so specs never inherit a deleted temp dir as their cwd.
+func chdirTo(dir string) {
+	orig, err := os.Getwd()
+	expectNoErr(err)
+	expectNoErr(os.Chdir(dir))
+	DeferCleanup(func() { expectNoErr(os.Chdir(orig)) })
+}
+
+func isWindows() bool { return runtime.GOOS == "windows" }
+
+// claudeDesktopDir mirrors doctor's per-platform Claude Desktop detection path.
+func claudeDesktopDir(home string) string {
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "Claude")
+	case "windows":
+		return filepath.Join(os.Getenv("APPDATA"), "Claude")
+	default:
+		return filepath.Join(home, ".config", "Claude")
+	}
+}
+
+// chatGPTDesktopDir mirrors doctor's per-platform ChatGPT Desktop path.
+func chatGPTDesktopDir(home string) string {
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "com.openai.chat")
+	case "windows":
+		return filepath.Join(os.Getenv("APPDATA"), "ChatGPT")
+	default:
+		return filepath.Join(home, ".config", "ChatGPT")
+	}
+}
 
 func expectNoErr(err error) {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+}
+
+// quotedBin mirrors the shell quoting doctor uses in generated hook commands.
+func quotedBin(suffix string) string {
+	exe := mustExe()
+	if isWindows() {
+		return `"` + exe + `" ` + suffix
+	}
+	return "'" + exe + "' " + suffix
 }
 
 var _ = Describe("copilot-hook", func() {
@@ -173,7 +226,7 @@ var _ = Describe("doctor --fix (codex/copilot/pi)", func() {
 		expectNoErr(json.Unmarshal(data, &hooks))
 		Expect(hooks.Hooks.PreToolUse).To(HaveLen(1))
 		Expect(hooks.Hooks.PreToolUse[0].Hooks[0].Command).
-			To(Equal(strconv.Quote(mustExe()) + " claude-hook"))
+			To(Equal(quotedBin("claude-hook")))
 
 		backupData, err := os.ReadFile(hooksPath + ".bak-loopguard")
 		expectNoErr(err)
@@ -184,8 +237,7 @@ var _ = Describe("doctor --fix (codex/copilot/pi)", func() {
 		isolateHome()
 		project := GinkgoT().TempDir()
 		expectNoErr(os.MkdirAll(filepath.Join(project, ".github"), 0o755))
-		expectNoErr(os.Chdir(project))
-		DeferCleanup(func() { expectNoErr(os.Chdir(project)) })
+		chdirTo(project)
 
 		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
 		Expect(code).To(Equal(0))
@@ -200,7 +252,7 @@ var _ = Describe("doctor --fix (codex/copilot/pi)", func() {
 		hooks := cfg["hooks"].(map[string]any)["preToolUse"].([]any)
 		Expect(hooks).To(HaveLen(1))
 		entry := hooks[0].(map[string]any)
-		Expect(entry["bash"]).To(Equal(strconv.Quote(mustExe()) + " copilot-hook"))
+		Expect(entry["bash"]).To(Equal(quotedBin("copilot-hook")))
 	})
 
 	It("installs the Pi extension with the binary path embedded", func() {
@@ -216,18 +268,19 @@ var _ = Describe("doctor --fix (codex/copilot/pi)", func() {
 		expectNoErr(err)
 		s := string(data)
 		Expect(s).To(ContainSubstring(`pi.on("tool_call"`))
-		Expect(s).To(ContainSubstring(strconv.Quote(mustExe())))
+		bin, err := json.Marshal(mustExe())
+		expectNoErr(err)
+		Expect(s).To(ContainSubstring(string(bin)))
 		Expect(s).NotTo(ContainSubstring("__LOOPGUARD_BIN__"))
 	})
 })
 
 var _ = Describe("doctor --fix (vscode)", func() {
 	It("writes the flat VS Code hook into .github/hooks and is idempotent", func() {
-		home := isolateHome()
+		isolateHome()
 		project := GinkgoT().TempDir()
 		expectNoErr(os.MkdirAll(filepath.Join(project, ".vscode"), 0o755))
-		expectNoErr(os.Chdir(project))
-		DeferCleanup(func() { expectNoErr(os.Chdir(home)) })
+		chdirTo(project)
 
 		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
 		Expect(code).To(Equal(0))
@@ -242,7 +295,7 @@ var _ = Describe("doctor --fix (vscode)", func() {
 		Expect(pre).To(HaveLen(1))
 		entry := pre[0].(map[string]any)
 		Expect(entry["type"]).To(Equal("command"))
-		Expect(entry["command"]).To(Equal(strconv.Quote(mustExe()) + " vscode-hook"))
+		Expect(entry["command"]).To(Equal(quotedBin("vscode-hook")))
 		// No Copilot-format file: VS Code would run both and double-record.
 		_, err = os.Stat(filepath.Join(project, ".github", "hooks", "loop-guard-hooks.json"))
 		Expect(os.IsNotExist(err)).To(BeTrue())
@@ -256,15 +309,14 @@ var _ = Describe("doctor --fix (vscode)", func() {
 	})
 
 	It("does not add a second file when the Copilot CLI hook already exists", func() {
-		home := isolateHome()
+		isolateHome()
 		project := GinkgoT().TempDir()
 		expectNoErr(os.MkdirAll(filepath.Join(project, ".vscode"), 0o755))
 		expectNoErr(os.MkdirAll(filepath.Join(project, ".github", "hooks"), 0o755))
 		copilotPath := filepath.Join(project, ".github", "hooks", "loop-guard-hooks.json")
 		expectNoErr(os.WriteFile(copilotPath, []byte(
 			`{"version":1,"hooks":{"preToolUse":[{"type":"command","bash":"x copilot-hook"}]}}`), 0o600))
-		expectNoErr(os.Chdir(project))
-		DeferCleanup(func() { expectNoErr(os.Chdir(home)) })
+		chdirTo(project)
 
 		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
 		Expect(code).To(Equal(0))
@@ -280,7 +332,7 @@ var _ = Describe("desktop apps", func() {
 	It("treats the Claude Desktop app as claude-code: same settings.json, wired by --fix", func() {
 		home := isolateHome()
 		// Desktop app installed, but ~/.claude does not exist yet.
-		expectNoErr(os.MkdirAll(filepath.Join(home, "Library", "Application Support", "Claude"), 0o755))
+		expectNoErr(os.MkdirAll(claudeDesktopDir(home), 0o755))
 
 		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
 		Expect(code).To(Equal(0))
@@ -297,7 +349,7 @@ var _ = Describe("desktop apps", func() {
 	It("treats the ChatGPT Desktop app as codex: same ~/.codex config, wired by --fix", func() {
 		home := isolateHome()
 		// Desktop app installed, but ~/.codex does not exist yet.
-		expectNoErr(os.MkdirAll(filepath.Join(home, "Library", "Application Support", "com.openai.chat"), 0o755))
+		expectNoErr(os.MkdirAll(chatGPTDesktopDir(home), 0o755))
 
 		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
 		Expect(code).To(Equal(0))
@@ -345,10 +397,7 @@ var _ = Describe("doctor", func() {
 		home := isolateHome()
 		project := filepath.Join(home, "proj")
 		expectNoErr(os.MkdirAll(filepath.Join(project, ".opencode"), 0o755))
-		expectNoErr(os.Chdir(project))
-		DeferCleanup(func() {
-			expectNoErr(os.Chdir(home))
-		})
+		chdirTo(project)
 
 		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
 		Expect(code).To(Equal(0))
@@ -357,10 +406,10 @@ var _ = Describe("doctor", func() {
 		data, err := os.ReadFile(filepath.Join(project, ".opencode", "plugins", "loop-guard.js"))
 		expectNoErr(err)
 		Expect(string(data)).To(ContainSubstring("tool.execute.before"))
-		// The plugin embeds the absolute binary path, JSON-quoted.
-		exe, err := os.Executable()
+		// The plugin embeds the absolute binary path as a JS string literal.
+		bin, err := json.Marshal(mustExe())
 		expectNoErr(err)
-		Expect(string(data)).To(ContainSubstring(strconv.Quote(exe)))
+		Expect(string(data)).To(ContainSubstring(string(bin)))
 		Expect(string(data)).NotTo(ContainSubstring("__LOOPGUARD_BIN__"))
 	})
 
@@ -382,12 +431,10 @@ var _ = Describe("doctor", func() {
 		pre := settings["hooks"].(map[string]any)["PreToolUse"].([]any)
 		Expect(pre).To(HaveLen(1))
 
-		// The hook command embeds the absolute binary path, quoted.
+		// The hook command embeds the absolute binary path, shell-quoted.
 		entry := pre[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
 		cmd := entry["command"].(string)
-		exe, err := os.Executable()
-		expectNoErr(err)
-		Expect(cmd).To(Equal(strconv.Quote(exe) + " claude-hook"))
+		Expect(cmd).To(Equal(quotedBin("claude-hook")))
 
 		backupData, err := os.ReadFile(settingsPath + ".bak-loopguard")
 		expectNoErr(err)
@@ -399,6 +446,23 @@ var _ = Describe("doctor", func() {
 		expectNoErr(json.Unmarshal(data, &settings))
 		pre = settings["hooks"].(map[string]any)["PreToolUse"].([]any)
 		Expect(pre).To(HaveLen(1)) // still one entry: idempotent
+	})
+
+	It("refuses to merge into an unexpected hooks shape instead of clobbering it", func() {
+		home := isolateHome()
+		settingsDir := filepath.Join(home, ".claude")
+		expectNoErr(os.MkdirAll(settingsDir, 0o755))
+		settingsPath := filepath.Join(settingsDir, "settings.json")
+		original := `{"hooks":[]}`
+		expectNoErr(os.WriteFile(settingsPath, []byte(original), 0o600))
+
+		code, _, stderr := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
+		Expect(code).To(Equal(0))
+		Expect(stderr).To(ContainSubstring("unexpected JSON type"))
+
+		data, err := os.ReadFile(settingsPath)
+		expectNoErr(err)
+		Expect(string(data)).To(Equal(original)) // untouched
 	})
 })
 
