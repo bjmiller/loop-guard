@@ -40,14 +40,14 @@ type claudeHookInput struct {
 // Field names have varied across Copilot versions, so both camelCase and
 // snake_case spellings are accepted for every field.
 type copilotHookInput struct {
-	SessionID   string          `json:"sessionId"`
-	SessionID2  string          `json:"session_id"`
-	ToolName    string          `json:"toolName"`
-	ToolName2   string          `json:"tool_name"`
-	ToolInput   json.RawMessage `json:"toolInput"`
-	ToolInput2  json.RawMessage `json:"tool_input"`
-	Input       json.RawMessage `json:"input"`
-	Args        json.RawMessage `json:"args"`
+	SessionID  string          `json:"sessionId"`
+	SessionID2 string          `json:"session_id"`
+	ToolName   string          `json:"toolName"`
+	ToolName2  string          `json:"tool_name"`
+	ToolInput  json.RawMessage `json:"toolInput"`
+	ToolInput2 json.RawMessage `json:"tool_input"`
+	Input      json.RawMessage `json:"input"`
+	Args       json.RawMessage `json:"args"`
 
 	// conversationId is the most stable per-conversation identifier Copilot
 	// has exposed in hook payloads; it wins over sessionId when present.
@@ -97,6 +97,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdClaudeHook(args[1:], stdin, stdout, stderr)
 	case "copilot-hook":
 		return cmdCopilotHook(args[1:], stdin, stdout, stderr)
+	case "vscode-hook":
+		return cmdVSCodeHook(args[1:], stdin, stdout, stderr)
 	case "doctor":
 		return cmdDoctor(args[1:], stdout, stderr)
 	case "init":
@@ -124,9 +126,10 @@ Commands:
   check        Read-only evaluation of a session's current state.
   claude-hook  Adapter for Claude Code / Codex PreToolUse hooks (reads hook JSON).
   copilot-hook Adapter for GitHub Copilot CLI preToolUse hooks (reads hook JSON).
+  vscode-hook  Adapter for VS Code chat agent hooks (reads hook JSON).
   doctor       Detect installed harnesses, validate setup. --fix wires config.
-  init         Print integration instructions for a harness
-               (--harness custom|claude|opencode|codex|copilot|pi).
+	init         Print integration instructions for a harness
+               (--harness custom|claude|opencode|codex|copilot|pi|vscode).
   serve        Run as an MCP server over stdio.
   version      Print version.
 
@@ -361,4 +364,80 @@ func cmdCopilotHook(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		return exitErr
 	}
 	return emitVerdict(v, stdout, stderr)
+}
+
+// vscodeSessionFallback is the session id used when VS Code omits session_id
+// (an optional field in its hook payload). Sharing one state file across such
+// sessions only makes detection marginally more eager, never less.
+const vscodeSessionFallback = "vscode"
+
+// vscodeOutput is the stdout contract VS Code hooks parse on exit 0.
+type vscodeOutput struct {
+	Continue   bool   `json:"continue"`
+	StopReason string `json:"stopReason,omitempty"`
+}
+
+// cmdVSCodeHook adapts VS Code chat's agent hooks (Preview) onto record
+// semantics. The stdin payload matches Claude Code's (session_id, tool_name,
+// tool_input), but the exit contract differs: exit 2 blocks the call and
+// feeds stderr to the model, while a tripped breaker must exit 0 with
+// {"continue":false} — a plain exit 3 is only a non-blocking warning in VS
+// Code and would let the looping tool call proceed. Our own errors exit 1,
+// which VS Code treats as fail-open.
+func cmdVSCodeHook(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("vscode-hook", flag.ContinueOnError)
+	cacheDir := fs.String("cache-dir", "", "state directory override")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "loop-guard vscode-hook: %v\n", err)
+		return exitErr
+	}
+	raw, err := readAll(stdin)
+	if err != nil || len(raw) == 0 {
+		fmt.Fprintln(stderr, "loop-guard vscode-hook: expected hook JSON on stdin")
+		return exitErr
+	}
+	var h claudeHookInput
+	if err := json.Unmarshal(raw, &h); err != nil {
+		fmt.Fprintf(stderr, "loop-guard vscode-hook: parse hook input: %v\n", err)
+		return exitErr
+	}
+	session := h.SessionID
+	if session == "" {
+		session = vscodeSessionFallback
+	}
+	if h.ToolName == "" {
+		fmt.Fprintln(stderr, "loop-guard vscode-hook: hook input needs a tool_name")
+		return exitErr
+	}
+
+	g, err := newGuard(*cacheDir, detector.Config{}, guard.DefaultMaxInterventions)
+	if err != nil {
+		fmt.Fprintf(stderr, "loop-guard vscode-hook: %v\n", err)
+		return exitErr
+	}
+	v, err := g.Record(session, state.Event{
+		Type: "tool",
+		Name: h.ToolName,
+		Args: rawArgs(h.ToolInput),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "loop-guard vscode-hook: %v\n", err)
+		return exitErr
+	}
+
+	switch v.Action {
+	case guard.ActionInject, guard.ActionInjectFinal:
+		// Exit 2: VS Code blocks the call and shows stderr to the model.
+		fmt.Fprintln(stderr, v.Message)
+		return exitLoop
+	case guard.ActionBreaker:
+		// continue:false ends the whole agent session; stopReason is shown
+		// to the user and carries the handoff artifact path.
+		out, _ := json.Marshal(vscodeOutput{Continue: false, StopReason: v.Message})
+		fmt.Fprintln(stdout, string(out))
+		return exitOK
+	default:
+		fmt.Fprintln(stdout, `{"continue":true}`)
+		return exitOK
+	}
 }

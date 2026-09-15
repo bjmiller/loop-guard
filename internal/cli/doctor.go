@@ -73,6 +73,18 @@ func copilotProjectHooksDir(p Paths) string {
 	return filepath.Join(p.WorkDir, ".github", "hooks")
 }
 
+// VS Code chat (Preview): loads every *.json in .github/hooks/ (workspace
+// scope). The folder is shared with Copilot CLI, whose config schema differs
+// (lowerCamelCase events, "bash" command property) — VS Code parses both, so
+// doctor keeps the two loop-guard files mutually exclusive per workspace.
+func copilotProjectHookJSON(p Paths) string {
+	return filepath.Join(copilotProjectHooksDir(p), copilotHookJSONName)
+}
+
+func vscodeProjectHookJSON(p Paths) string {
+	return filepath.Join(copilotProjectHooksDir(p), vscodeHookJSONName)
+}
+
 func copilotUserHooksDir(p Paths) string {
 	if ch := os.Getenv("COPILOT_HOME"); ch != "" {
 		return filepath.Join(ch, "hooks")
@@ -130,6 +142,7 @@ func chatGPTDesktopDir(p Paths) string {
 var (
 	piExtensionFileName = "loop-guard.ts"
 	copilotHookJSONName = "loop-guard-hooks.json"
+	vscodeHookJSONName  = "loop-guard.json"
 	codexHooksJSONName  = "hooks.json"
 )
 
@@ -235,6 +248,47 @@ func copilotWired(hooksPath string) bool {
 		indexOf(data, []byte("copilot-hook")) >= 0
 }
 
+func fileContains(path, substr string) bool {
+	data, err := os.ReadFile(path)
+	return err == nil && indexOf(data, []byte(substr)) >= 0
+}
+
+// nativeVSCodeWired reports whether our VS Code-format hook file already
+// carries a loop-guard entry. Both signatures are checked because the
+// embedded binary path may not contain "loop-guard" (renamed or installed
+// anywhere); the adapter name is the stable marker.
+func nativeVSCodeWired(p Paths) bool {
+	native := vscodeProjectHookJSON(p)
+	return fileContains(native, "loop-guard") || fileContains(native, "vscode-hook")
+}
+
+// vscodeWired reports whether VS Code already runs a loop-guard hook for
+// this workspace: either our native .github/hooks/loop-guard.json or a
+// Copilot CLI-format file, which VS Code also parses and executes. Wiring a
+// second file when one of these exists would make VS Code double-record
+// every tool call under the same session id.
+func vscodeWired(p Paths) bool {
+	if nativeVSCodeWired(p) {
+		return true
+	}
+	copilot := copilotProjectHookJSON(p)
+	return fileContains(copilot, "loop-guard") || fileContains(copilot, "copilot-hook")
+}
+
+// vscodeDetail reports where the effective VS Code hook lives: our native
+// file when present, otherwise the Copilot CLI file VS Code also loads.
+func vscodeDetail(p Paths) string {
+	native := vscodeProjectHookJSON(p)
+	if fileExists(native) {
+		return native
+	}
+	if copilot := copilotProjectHookJSON(p); fileContains(copilot, "loop-guard") ||
+		fileContains(copilot, "copilot-hook") {
+		return copilot + " (copilot format)"
+	}
+	return native
+}
+
 func detectHarnesses(p Paths) []harnessStatus {
 	claudeSettings := claudeSettingsPath(p)
 	opGlobal := openCodeGlobalRoot(p)
@@ -243,7 +297,7 @@ func detectHarnesses(p Paths) []harnessStatus {
 	codexProject := codexProjectRoot(p)
 	piGlobal := piGlobalExtDir(p)
 
-	copilotProjectJSON := filepath.Join(copilotProjectHooksDir(p), copilotHookJSONName)
+	copilotProjectJSON := copilotProjectHookJSON(p)
 	copilotUserJSON := filepath.Join(copilotUserHooksDir(p), copilotHookJSONName)
 
 	return []harnessStatus{
@@ -270,6 +324,14 @@ func detectHarnesses(p Paths) []harnessStatus {
 			Detected: fileExists(codexProject),
 			Wired:    codexWired(filepath.Join(codexProject, codexHooksJSONName)),
 			Detail:   filepath.Join(codexProject, codexHooksJSONName),
+		},
+		{
+			Name: "vscode (project)",
+			// .vscode/ is a strong signal the workspace is used with VS
+			// Code; its hooks live in .github/hooks/ next to Copilot CLI's.
+			Detected: fileExists(filepath.Join(p.WorkDir, ".vscode")),
+			Wired:    vscodeWired(p),
+			Detail:   vscodeDetail(p),
 		},
 		{
 			Name:     "copilot-cli (project)",
@@ -446,7 +508,18 @@ func applyFixes(p Paths, statuses []harnessStatus, stdout, stderr io.Writer) int
 			err = wireCodexHook(filepath.Join(codexUserRoot(p), codexHooksJSONName))
 		case "codex (project)":
 			err = wireCodexHook(filepath.Join(codexProjectRoot(p), codexHooksJSONName))
+		case "vscode (project)":
+			err = wireVSCodeHook(copilotProjectHooksDir(p))
 		case "copilot-cli (project)":
+			// VS Code parses both hook formats, so a Copilot-format
+			// loop-guard file alongside the native one would double-record
+			// every call in VS Code sessions. The native file wins; Copilot
+			// CLI ignores it and stays covered at user level.
+			if nativeVSCodeWired(p) {
+				fmt.Fprintf(stdout, "skipped %s -> %s (VS Code-format %s already covers .github/hooks; see 'loop-guard init --harness vscode')\n",
+					h.Name, h.Detail, vscodeHookJSONName)
+				continue
+			}
 			err = wireCopilotHook(copilotProjectHooksDir(p))
 		case "copilot-cli (user)":
 			err = wireCopilotHook(copilotUserHooksDir(p))
@@ -506,6 +579,10 @@ func codexCommand() string {
 
 func copilotCommand() string {
 	return strconv.Quote(ResolveLoopGuardBin()) + " copilot-hook"
+}
+
+func vscodeCommand() string {
+	return strconv.Quote(ResolveLoopGuardBin()) + " vscode-hook"
 }
 
 func wireClaudeHook(settingsPath string) error {
@@ -602,6 +679,52 @@ func wireCopilotHook(hooksDir string) error {
 	hooks["preToolUse"] = append(pre, map[string]any{
 		"type": "command",
 		"bash": copilotCommand(),
+	})
+
+	out, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	if mkErr := os.MkdirAll(hooksDir, 0o755); mkErr != nil {
+		return mkErr
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+// wireVSCodeHook merges a PreToolUse entry into VS Code's flat hook format
+// (.github/hooks/loop-guard.json), backing up any existing file first. No
+// matcher nesting: VS Code ignores matchers and fires the hook on every tool
+// call.
+func wireVSCodeHook(hooksDir string) error {
+	path := filepath.Join(hooksDir, vscodeHookJSONName)
+	data, err := os.ReadFile(path)
+	if err == nil && (indexOf(data, []byte("loop-guard")) >= 0 ||
+		indexOf(data, []byte("vscode-hook")) >= 0) {
+		return nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	config := map[string]any{}
+	if err == nil {
+		if json.Unmarshal(data, &config) != nil {
+			return fmt.Errorf("%s is not valid JSON; refusing to modify", path)
+		}
+		backup := path + ".bak-loopguard"
+		if backupErr := os.WriteFile(backup, data, 0o600); backupErr != nil {
+			return fmt.Errorf("backup %s: %w", backup, backupErr)
+		}
+	}
+	hooks, _ := config["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+		config["hooks"] = hooks
+	}
+	pre, _ := hooks["PreToolUse"].([]any)
+	hooks["PreToolUse"] = append(pre, map[string]any{
+		"type":    "command",
+		"command": vscodeCommand(),
 	})
 
 	out, err := json.MarshalIndent(config, "", "  ")

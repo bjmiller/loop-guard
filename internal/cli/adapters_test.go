@@ -92,6 +92,65 @@ var _ = Describe("copilot-hook", func() {
 	})
 })
 
+var _ = Describe("vscode-hook", func() {
+	var cacheDir string
+
+	BeforeEach(func() {
+		cacheDir = GinkgoT().TempDir()
+		DeferCleanup(os.Unsetenv, "LOOPGUARD_CACHE_DIR")
+		Expect(os.Setenv("LOOPGUARD_CACHE_DIR", cacheDir)).To(Succeed())
+	})
+
+	It("maps VS Code hook payloads onto record semantics", func() {
+		code, out, _ := runCLIWithStdin(
+			`{"session_id":"vsc-1","tool_name":"create_file","tool_input":{"filePath":"a.go"}}`,
+			"vscode-hook")
+		Expect(code).To(Equal(0))
+		var v map[string]any
+		Expect(json.Unmarshal([]byte(out), &v)).To(Succeed())
+		Expect(v).To(HaveKeyWithValue("continue", true))
+
+		data, err := os.ReadFile(filepath.Join(cacheDir, "vsc-1.json"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(data)).To(ContainSubstring("a.go"))
+	})
+
+	It("falls back to a shared session when session_id is omitted", func() {
+		code, _, _ := runCLIWithStdin(`{"tool_name":"bash","tool_input":{"command":"make"}}`, "vscode-hook")
+		Expect(code).To(Equal(0))
+		_, err := os.Stat(filepath.Join(cacheDir, "vscode.json"))
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("blocks with exit 2 and the recovery prompt on stderr", func() {
+		payload := `{"session_id":"vsc-3","tool_name":"Bash","tool_input":{"command":"flaky"}}`
+		for i := 0; i < 2; i++ {
+			runCLIWithStdin(payload, "vscode-hook")
+		}
+		code, _, stderr := runCLIWithStdin(payload, "vscode-hook")
+		Expect(code).To(Equal(2))
+		Expect(stderr).NotTo(BeEmpty())
+	})
+
+	It("ends the session with continue:false instead of exit 3 when the breaker trips", func() {
+		payload := `{"session_id":"vsc-4","tool_name":"Bash","tool_input":{"command":"flaky"}}`
+		for i := 0; i < 5; i++ {
+			runCLIWithStdin(payload, "vscode-hook")
+		}
+		code, out, _ := runCLIWithStdin(payload, "vscode-hook")
+		Expect(code).To(Equal(0)) // exit 3 would be a non-blocking warning in VS Code
+		var v map[string]any
+		Expect(json.Unmarshal([]byte(out), &v)).To(Succeed())
+		Expect(v["continue"]).To(BeFalse())
+		Expect(v["stopReason"]).To(ContainSubstring("handoff"))
+	})
+
+	It("fails cleanly on malformed hook input", func() {
+		code, _, _ := runCLIWithStdin("garbage", "vscode-hook")
+		Expect(code).To(Equal(1))
+	})
+})
+
 var _ = Describe("doctor --fix (codex/copilot/pi)", func() {
 	It("merges a PreToolUse hook into an existing Codex hooks.json with backup", func() {
 		home := isolateHome()
@@ -165,6 +224,61 @@ var _ = Describe("doctor --fix (codex/copilot/pi)", func() {
 		Expect(s).To(ContainSubstring(`pi.on("tool_call"`))
 		Expect(s).To(ContainSubstring(strconv.Quote(mustExe())))
 		Expect(s).NotTo(ContainSubstring("__LOOPGUARD_BIN__"))
+	})
+})
+
+var _ = Describe("doctor --fix (vscode)", func() {
+	It("writes the flat VS Code hook into .github/hooks and is idempotent", func() {
+		home := isolateHome()
+		project := GinkgoT().TempDir()
+		expectNoErr(os.MkdirAll(filepath.Join(project, ".vscode"), 0o755))
+		expectNoErr(os.Chdir(project))
+		DeferCleanup(func() { expectNoErr(os.Chdir(home)) })
+
+		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
+		Expect(code).To(Equal(0))
+		Expect(out).To(ContainSubstring("wired vscode (project)"))
+
+		path := filepath.Join(project, ".github", "hooks", "loop-guard.json")
+		data, err := os.ReadFile(path)
+		expectNoErr(err)
+		var cfg map[string]any
+		expectNoErr(json.Unmarshal(data, &cfg))
+		pre := cfg["hooks"].(map[string]any)["PreToolUse"].([]any)
+		Expect(pre).To(HaveLen(1))
+		entry := pre[0].(map[string]any)
+		Expect(entry["type"]).To(Equal("command"))
+		Expect(entry["command"]).To(Equal(strconv.Quote(mustExe()) + " vscode-hook"))
+		// No Copilot-format file: VS Code would run both and double-record.
+		_, err = os.Stat(filepath.Join(project, ".github", "hooks", "loop-guard-hooks.json"))
+		Expect(os.IsNotExist(err)).To(BeTrue())
+
+		code, out, _ = runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
+		Expect(code).To(Equal(0))
+		Expect(out).NotTo(ContainSubstring("wired vscode"))
+		// .github/hooks now exists, so the Copilot CLI wiring is detected
+		// but must decline the occupied slot.
+		Expect(out).To(ContainSubstring("skipped copilot-cli (project)"))
+	})
+
+	It("does not add a second file when the Copilot CLI hook already exists", func() {
+		home := isolateHome()
+		project := GinkgoT().TempDir()
+		expectNoErr(os.MkdirAll(filepath.Join(project, ".vscode"), 0o755))
+		expectNoErr(os.MkdirAll(filepath.Join(project, ".github", "hooks"), 0o755))
+		copilotPath := filepath.Join(project, ".github", "hooks", "loop-guard-hooks.json")
+		expectNoErr(os.WriteFile(copilotPath, []byte(
+			`{"version":1,"hooks":{"preToolUse":[{"type":"command","bash":"x copilot-hook"}]}}`), 0o600))
+		expectNoErr(os.Chdir(project))
+		DeferCleanup(func() { expectNoErr(os.Chdir(home)) })
+
+		code, out, _ := runCLI("doctor", "--fix", "--cache-dir", GinkgoT().TempDir())
+		Expect(code).To(Equal(0))
+		Expect(out).NotTo(ContainSubstring("wired vscode"))
+		Expect(out).To(ContainSubstring("copilot format"))
+
+		_, err := os.Stat(filepath.Join(project, ".github", "hooks", "loop-guard.json"))
+		Expect(os.IsNotExist(err)).To(BeTrue())
 	})
 })
 
@@ -312,6 +426,7 @@ var _ = Describe("init", func() {
 			{"codex", ".codex/hooks.json"},
 			{"copilot", "preToolUse"},
 			{"pi", "tool_call"},
+			{"vscode", ".github/hooks/loop-guard.json"},
 		}
 		for _, tc := range cases {
 			var out bytes.Buffer

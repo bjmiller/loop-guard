@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"io"
 )
+
 func cmdInit(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	harness := fs.String("harness", "custom", "which harness: custom, claude, opencode, codex, copilot, or pi")
+	harness := fs.String("harness", "custom", "which harness: custom, claude, opencode, codex, copilot, pi, or vscode")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "loop-guard init: %v\n", err)
 		return exitErr
@@ -24,10 +25,12 @@ func cmdInit(args []string, stdout, stderr io.Writer) int {
 		io.WriteString(stdout, copilotInstructions)
 	case "pi":
 		io.WriteString(stdout, piInstructions)
+	case "vscode":
+		io.WriteString(stdout, vscodeInstructions)
 	case "custom":
 		fmt.Fprint(stdout, customInstructions)
 	default:
-		fmt.Fprintf(stderr, "loop-guard init: unknown harness %q (want custom, claude, opencode, codex, copilot, or pi)\n", *harness)
+		fmt.Fprintf(stderr, "loop-guard init: unknown harness %q (want custom, claude, opencode, codex, copilot, pi, or vscode)\n", *harness)
 		return exitErr
 	}
 	return exitOK
@@ -259,6 +262,51 @@ Create .pi/extensions/loop-guard.ts (or ~/.pi/agent/extensions/loop-guard.ts):
 
 Reload with /reload (or restart pi). Exit code 3 additionally aborts the
 session; seed a FRESH session with the handoff artifact named in the reason.
+`
+
+const vscodeInstructions = cliContract + `
+Visual Studio Code chat setup (agent hooks, Preview)
+====================================================
+Automatic: 'loop-guard doctor --fix' writes .github/hooks/loop-guard.json
+(workspace) invoking the native 'vscode-hook' adapter. VS Code loads every
+*.json in .github/hooks/ and hot-reloads on save.
+
+Manual steps if you prefer:
+
+1. Create .github/hooks/loop-guard.json in your workspace:
+
+    {
+      "hooks": {
+        "PreToolUse": [
+          { "type": "command", "command": "\"/abs/path/to/loop-guard\" vscode-hook" }
+        ]
+      }
+    }
+
+   VS Code's format is flat (no matcher nesting) and matchers are ignored
+   anyway; the hook fires on every tool call.
+
+Exit-code mapping (differs from Claude Code):
+  0 + {"continue":true}   allow
+  2                       block the call; stderr (the recovery prompt) is
+                          fed to the model
+  0 + {"continue":false}  breaker tripped — ends the whole agent session;
+                          stopReason carries the handoff artifact path
+  The adapter never exits 3: VS Code treats it as a non-blocking warning and
+  would run the looping tool call anyway.
+
+Notes:
+- VS Code also reads .claude/settings.json (Claude Code format) and Copilot
+  CLI's .github/hooks configs, so those wirings protect VS Code chat sessions
+  too — except the breaker, which only the vscode-hook adapter maps onto
+  continue:false.
+- If .github/hooks/loop-guard-hooks.json (Copilot CLI format) already
+  contains a loop-guard hook, doctor --fix will NOT add a second file: VS
+  Code would run both and double-record every call. Remove the Copilot file
+  if you want the native wiring with full breaker semantics.
+- VS Code tool_input is camelCase (tool_input.filePath) and tool names differ
+  from Claude Code (create_file, replace_string_in_file); the adapter records
+  whatever it receives, so detection works unchanged.
 `
 
 const customInstructions = cliContract + `

@@ -36,7 +36,7 @@ Then wire your harness(es):
 ```sh
 loop-guard doctor          # report detected harnesses + self-tests
 loop-guard doctor --fix    # auto-wire opencode / Claude Code / Codex /
-                           # Copilot CLI / Pi configs
+                           # Copilot CLI / Pi / VS Code configs
 ```
 
 `--fix` is idempotent, merges JSON instead of overwriting it, and backs up any
@@ -51,11 +51,11 @@ echo '{"type":"tool","name":"bash","args":{"command":"npm test"}}' \
   | loop-guard record --session "$SESSION_ID"
 ```
 
-| Exit | Meaning | Harness action |
-|------|---------|----------------|
-| 0 | allow | proceed |
-| 2 | loop detected | block the call; feed stderr (the recovery prompt) to the model |
-| 3 | breaker tripped | end the session; show `handoff_path` from stdout JSON |
+| Exit | Meaning         | Harness action                                                 |
+| ---- | --------------- | -------------------------------------------------------------- |
+| 0    | allow           | proceed                                                        |
+| 2    | loop detected   | block the call; feed stderr (the recovery prompt) to the model |
+| 3    | breaker tripped | end the session; show `handoff_path` from stdout JSON          |
 
 Verdict JSON on stdout always accompanies the exit code. `loop-guard check`
 evaluates read-only (never records, never trips the breaker).
@@ -65,15 +65,24 @@ State lives in one JSON file per session under the platform cache dir
 
 ## Harness support
 
-| Harness | Mechanism | Setup |
-|---------|-----------|-------|
-| OpenCode | plugin (`tool.execute.before`) | `doctor --fix`, or copy `internal/cli/assets/opencode-plugin.js` |
-| Claude Code (CLI, IDE, or Desktop app) | `PreToolUse` hook (`claude-hook` adapter) — Desktop fires the same hooks from `~/.claude/settings.json` | `doctor --fix`, or `init --harness claude` for manual steps |
-| Codex CLI / ChatGPT desktop app | `PreToolUse` hook in `.codex/hooks.json` (shared config; exit 2 + stderr blocks) | `doctor --fix`, or `init --harness codex`; trust via `/hooks` inside Codex |
-| GitHub Copilot CLI | `preToolUse` command hook (`.github/hooks/`) via the native `copilot-hook` adapter | `doctor --fix`, or `init --harness copilot` |
-| Pi coding agent | TypeScript extension (`tool_call` event) | `doctor --fix`, or `init --harness pi` |
-| MCP-speaking harnesses | stdio MCP server | register command `loop-guard serve` |
-| Anything else | generic CLI contract | `loop-guard init --harness custom` |
+| Harness                                | Mechanism                                                                                               | Setup                                                                      |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| OpenCode                               | plugin (`tool.execute.before`)                                                                          | `doctor --fix`, or copy `internal/cli/assets/opencode-plugin.js`           |
+| Claude Code (CLI, IDE, or Desktop app) | `PreToolUse` hook (`claude-hook` adapter) — Desktop fires the same hooks from `~/.claude/settings.json` | `doctor --fix`, or `init --harness claude` for manual steps                |
+| Codex CLI / ChatGPT desktop app        | `PreToolUse` hook in `.codex/hooks.json` (shared config; exit 2 + stderr blocks)                        | `doctor --fix`, or `init --harness codex`; trust via `/hooks` inside Codex |
+| GitHub Copilot CLI                     | `preToolUse` command hook (`.github/hooks/`) via the native `copilot-hook` adapter                      | `doctor --fix`, or `init --harness copilot`                                |
+| VS Code chat (agent hooks, Preview)    | `PreToolUse` hook in `.github/hooks/loop-guard.json` (flat format) via the native `vscode-hook` adapter; the breaker emits `continue:false` to end the session | `doctor --fix`, or `init --harness vscode`                          |
+| Pi coding agent                        | TypeScript extension (`tool_call` event)                                                                | `doctor --fix`, or `init --harness pi`                                     |
+| MCP-speaking harnesses                 | stdio MCP server                                                                                        | register command `loop-guard serve`                                        |
+| Anything else                          | generic CLI contract                                                                                    | `loop-guard init --harness custom`                                         |
+
+VS Code also reads `.claude/settings.json` (Claude Code format) and Copilot
+CLI's `.github/hooks` configs, so those wirings cover VS Code chat too — but
+only the native `vscode-hook` adapter maps the breaker onto `continue:false`
+(a bare exit 3 is just a non-blocking warning there, and the looping call
+would proceed). Because VS Code loads every file in `.github/hooks/` and
+parses both formats, `doctor --fix` wires VS Code and Copilot CLI mutually
+exclusively per workspace.
 
 ### Binary location (no PATH requirement)
 
@@ -102,13 +111,13 @@ tools `loop_guard_record` and `loop_guard_check`.
 
 ## Tuning
 
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--tool-threshold N` | 3 | identical calls within window before flagging |
-| `--tool-window N` | 6 | recent calls considered |
-| `--response-threshold N` | 3 | near-duplicate long responses before flagging |
-| `--similarity F` | 0.8 | token-Jaccard threshold for "near-duplicate" |
-| `--max-injections N` | 2 | recovery prompts before the breaker trips |
+| Flag                     | Default | Meaning                                       |
+| ------------------------ | ------- | --------------------------------------------- |
+| `--tool-threshold N`     | 3       | identical calls within window before flagging |
+| `--tool-window N`        | 6       | recent calls considered                       |
+| `--response-threshold N` | 3       | near-duplicate long responses before flagging |
+| `--similarity F`         | 0.8     | token-Jaccard threshold for "near-duplicate"  |
+| `--max-injections N`     | 2       | recovery prompts before the breaker trips     |
 
 Responses under 40 characters are exempt from similarity detection (short
 acknowledgements repeat naturally).
