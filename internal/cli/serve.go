@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/brian/loop-guard/internal/mcp"
+	"github.com/bjmiller/loop-guard/internal/mcp"
 )
 
 func newServeFlagSet() *flag.FlagSet {

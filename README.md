@@ -26,7 +26,7 @@ enforces from outside the conversation:
 Nothing is published yet. Build from source:
 
 ```sh
-go install github.com/brian/loop-guard@latest     # once pushed to a remote
+go install github.com/bjmiller/loop-guard@latest     # once pushed to a remote
 # or from a checkout:
 go build -o /usr/local/bin/loop-guard .
 ```

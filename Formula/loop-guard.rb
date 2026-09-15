@@ -1,14 +1,14 @@
 class LoopGuard < Formula
   desc "Infinite-loop prevention for coding agents"
-  homepage "https://github.com/brian/loop-guard"
-  url "https://github.com/brian/loop-guard/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/bjmiller/loop-guard"
+  url "https://github.com/bjmiller/loop-guard/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "" # fill from goreleaser checksums.txt at first real release
   license "MIT"
 
   depends_on "go" => :build
 
   def install
-    system "go", "build", "-ldflags", "-s -w -X github.com/brian/loop-guard/internal/version.Version=#{version}", *std_go_args(output: bin/"loop-guard")
+    system "go", "build", "-ldflags", "-s -w -X github.com/bjmiller/loop-guard/internal/version.Version=#{version}", *std_go_args(output: bin/"loop-guard")
   end
 
   test do

@@ -43,7 +43,7 @@ function resolveBinary() {
 
   fail(
     `no binary found for ${process.platform}-${process.arch}. ` +
-      `Install from source: go install github.com/brian/loop-guard@latest, ` +
+      `Install from source: go install github.com/bjmiller/loop-guard@latest, ` +
       `or set LOOPGUARD_BINARY to the binary path.`
   );
 }

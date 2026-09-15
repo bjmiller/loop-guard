@@ -10,7 +10,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/brian/loop-guard/internal/state"
+	"github.com/bjmiller/loop-guard/internal/state"
 )
 
 var _ = Describe("Store", func() {

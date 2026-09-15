@@ -4,7 +4,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/brian/loop-guard/internal/detector"
+	"github.com/bjmiller/loop-guard/internal/detector"
 )
 
 var _ = Describe("ToolFingerprint", func() {

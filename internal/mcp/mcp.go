@@ -10,10 +10,10 @@ import (
 	"io"
 	"strings"
 
-	"github.com/brian/loop-guard/internal/detector"
-	"github.com/brian/loop-guard/internal/guard"
-	"github.com/brian/loop-guard/internal/state"
-	"github.com/brian/loop-guard/internal/version"
+	"github.com/bjmiller/loop-guard/internal/detector"
+	"github.com/bjmiller/loop-guard/internal/guard"
+	"github.com/bjmiller/loop-guard/internal/state"
+	"github.com/bjmiller/loop-guard/internal/version"
 )
 
 const protocolVersion = "2024-11-05"

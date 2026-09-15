@@ -9,7 +9,7 @@ package main
 import (
 	"os"
 
-	"github.com/brian/loop-guard/internal/cli"
+	"github.com/bjmiller/loop-guard/internal/cli"
 )
 
 func main() {

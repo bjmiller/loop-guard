@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brian/loop-guard/internal/state"
+	"github.com/bjmiller/loop-guard/internal/state"
 )
 
 // RecoveryMessage is the prompt injected into the conversation when a loop is

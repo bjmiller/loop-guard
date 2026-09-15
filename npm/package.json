@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/brian/loop-guard"
+    "url": "https://github.com/bjmiller/loop-guard"
   },
   "bin": {
     "loop-guard": "bin/loop-guard.js"

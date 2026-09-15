@@ -9,7 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/brian/loop-guard/internal/cli"
+	"github.com/bjmiller/loop-guard/internal/cli"
 )
 
 // runCLI executes the CLI with LOOPGUARD_CACHE_DIR pointed at a temp dir and

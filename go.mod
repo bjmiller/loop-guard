@@ -1,4 +1,4 @@
-module github.com/brian/loop-guard
+module github.com/bjmiller/loop-guard
 
 go 1.27.0
 

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/brian/loop-guard/internal/detector"
-	"github.com/brian/loop-guard/internal/state"
+	"github.com/bjmiller/loop-guard/internal/detector"
+	"github.com/bjmiller/loop-guard/internal/state"
 )
 
 // Action tells the harness what to do with the verdict.

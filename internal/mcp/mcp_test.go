@@ -10,7 +10,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/brian/loop-guard/internal/mcp"
+	"github.com/bjmiller/loop-guard/internal/mcp"
 )
 
 // callServer runs one Serve goroutine over scripted input lines and returns

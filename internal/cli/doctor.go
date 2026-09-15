@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/brian/loop-guard/internal/state"
+	"github.com/bjmiller/loop-guard/internal/state"
 )
 
 // Paths abstracts filesystem locations so doctor/init are testable without

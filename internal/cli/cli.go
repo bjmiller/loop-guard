@@ -12,10 +12,10 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/brian/loop-guard/internal/detector"
-	"github.com/brian/loop-guard/internal/guard"
-	"github.com/brian/loop-guard/internal/state"
-	"github.com/brian/loop-guard/internal/version"
+	"github.com/bjmiller/loop-guard/internal/detector"
+	"github.com/bjmiller/loop-guard/internal/guard"
+	"github.com/bjmiller/loop-guard/internal/state"
+	"github.com/bjmiller/loop-guard/internal/version"
 )
 
 // Version is stamped at build time via -ldflags.

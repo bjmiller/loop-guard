@@ -11,17 +11,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/brian/loop-guard/internal/cli"
+	"github.com/bjmiller/loop-guard/internal/cli"
 )
 
-// doctorIn runs doctor with HOME/Config/WorkDir faked via env overrides that
-// DefaultPaths reads. We instead chdir into a temp dir and point XDG_CONFIG_HOME
-// and home at it.
-type fakeEnv struct {
-	dir string
-	old map[string]string
-}
-
+// isolateHome points HOME/USERPROFILE/XDG_CONFIG_HOME at a temp dir and
+// restores them when the test finishes.
 func isolateHome() string {
 	dir := GinkgoT().TempDir()
 	old := map[string]string{}
