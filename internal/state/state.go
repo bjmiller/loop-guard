@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -231,7 +233,14 @@ func (s *Store) lock(id string) (func(), error) {
 			}, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
-			return func() {}, fmt.Errorf("acquire lock: %w", err)
+			// Windows reports an exclusive create racing a still-open
+			// handle from another writer as EACCES rather than EEXIST.
+			// Treat it as ordinary contention: the stale/timeout logic
+			// below bounds the wait, and genuine permission problems
+			// still surface as a lock timeout.
+			if runtime.GOOS != "windows" || !errors.Is(err, fs.ErrPermission) {
+				return func() {}, fmt.Errorf("acquire lock: %w", err)
+			}
 		}
 		if info, statErr := os.Stat(lockPath); statErr == nil &&
 			time.Since(info.ModTime()) > StaleLockAge {
