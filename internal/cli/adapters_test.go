@@ -371,9 +371,10 @@ func mustExe() string {
 var _ = Describe("ResolveLoopGuardBin", func() {
 	It("prefers the LOOPGUARD_BINARY override", func() {
 		DeferCleanup(os.Unsetenv, "LOOPGUARD_BINARY")
-		Expect(os.Setenv("LOOPGUARD_BINARY", "/custom/place/loop-guard")).To(Succeed())
+		override := filepath.FromSlash("/custom/place/loop-guard")
+		Expect(os.Setenv("LOOPGUARD_BINARY", override)).To(Succeed())
 		p := cli.ResolveLoopGuardBin()
-		Expect(p).To(Equal("/custom/place/loop-guard"))
+		Expect(p).To(Equal(override))
 	})
 
 	It("falls back to the running executable (authoritative install location)", func() {
