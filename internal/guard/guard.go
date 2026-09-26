@@ -71,7 +71,7 @@ func (g *Guard) Record(sessionID string, ev state.Event) (Verdict, error) {
 		sess.Events = append(sess.Events, ev)
 		if d := g.detect(sess, cfg); d.Loop {
 			sess.Interventions++
-			verdict = g.escalate(sess, d, cfg)
+			verdict = g.escalate(sess, d)
 			return
 		}
 		verdict = g.allowVerdict(sess)
@@ -157,7 +157,7 @@ func (g *Guard) detect(sess *state.Session, cfg detector.Config) detector.Verdic
 
 // escalate applies the ladder step implied by the just-incremented
 // intervention count. Callers must have incremented sess.Interventions first.
-func (g *Guard) escalate(sess *state.Session, d detector.Verdict, cfg detector.Config) Verdict {
+func (g *Guard) escalate(sess *state.Session, d detector.Verdict) Verdict {
 	max := g.maxInterventions()
 	switch action := projectAction(sess.Interventions, max); action {
 	case ActionBreaker:

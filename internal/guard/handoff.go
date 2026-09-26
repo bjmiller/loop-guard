@@ -54,7 +54,9 @@ func WriteHandoff(dir string, sess *state.Session, kind string, count int, now t
 	b.WriteString("## Observed loop\n\n")
 	b.WriteString("The agent repeated the following pattern instead of changing strategy:\n\n")
 	for _, e := range loopPattern(sess, kind) {
-		b.WriteString("- " + e + "\n")
+		b.WriteString("- ")
+		b.WriteString(e)
+		b.WriteString("\n")
 	}
 
 	b.WriteString("\n## Recent activity (oldest first)\n\n")
