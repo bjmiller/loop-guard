@@ -7,12 +7,25 @@
 // is a no-op, so it is always safe to keep loaded.
 import { spawnSync } from "node:child_process";
 
+type PiExtensionAPI = {
+  on(
+    event: "tool_call",
+    handler: (
+      event: { toolName: string; input?: unknown },
+      ctx: {
+        sessionManager: { getSessionId?: () => string | undefined };
+        abort: () => void;
+      },
+    ) => Promise<void | { block: true; reason: string }>,
+  ): void;
+};
+
 // Injected at install time by `loop-guard doctor --fix`, which replaces this
 // string-literal placeholder wholesale with a JSON-quoted absolute path.
 // When null, only PATH lookup via the bare name is used.
 const LOOPGUARD_BIN = "__LOOPGUARD_BIN__"
 
-export default function (pi) {
+export default function (pi: PiExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const bin = LOOPGUARD_BIN.startsWith("__")
       ? process.env.LOOPGUARD_BINARY || "loop-guard"
